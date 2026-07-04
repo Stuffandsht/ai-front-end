@@ -1,0 +1,65 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "allowJs": false,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@agent-platform/audit": [
+        "packages/audit/src/index.ts"
+      ],
+      "@agent-platform/auth": [
+        "packages/auth/src/index.ts"
+      ],
+      "@agent-platform/config": [
+        "packages/config/src/index.ts"
+      ],
+      "@agent-platform/crypto": [
+        "packages/crypto/src/index.ts"
+      ],
+      "@agent-platform/db": [
+        "packages/db/src/index.ts"
+      ],
+      "@agent-platform/mcp-gateway": [
+        "packages/mcp-gateway/src/index.ts"
+      ],
+      "@agent-platform/policy": [
+        "packages/policy/src/index.ts"
+      ],
+      "@agent-platform/prompts": [
+        "packages/prompts/src/index.ts"
+      ],
+      "@agent-platform/providers": [
+        "packages/providers/src/index.ts"
+      ],
+      "@agent-platform/retention": [
+        "packages/retention/src/index.ts"
+      ],
+      "@agent-platform/runtime": [
+        "packages/runtime/src/index.ts"
+      ],
+      "@agent-platform/test-utils": [
+        "packages/test-utils/src/index.ts"
+      ],
+      "@/*": [
+        "apps/web/src/*"
+      ]
+    }
+  }
+}

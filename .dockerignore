@@ -1,0 +1,9 @@
+node_modules
+apps/*/.next
+playwright-report
+test-results
+.git
+.agents
+.codex
+*.log
+npm-debug.log*

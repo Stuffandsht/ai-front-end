@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+set -u
+
+usage() {
+  cat <<'EOF'
+Usage: codex-guard [guard options] [--] [codex args...]
+
+Launch Codex and stop it when local Codex session logs report that either the
+five-hour or weekly limit has 5% or less remaining.
+
+Guard options:
+  --remaining PCT     Remaining percentage floor before stopping (default: 5)
+  --interval SECONDS  Poll interval for local Codex logs (default: 15)
+  --grace SECONDS     Seconds to wait after SIGINT before SIGTERM (default: 20)
+  --dry-run           Report threshold breaches but do not stop Codex
+  -h, --help          Show this help
+
+Environment:
+  CODEX_GUARD_REMAINING_PERCENT
+  CODEX_GUARD_POLL_SECONDS
+  CODEX_GUARD_GRACE_SECONDS
+  CODEX_GUARD_CODEX_HOME
+  CODEX_GUARD_LOG
+
+Examples:
+  codex-guard
+  codex-guard --remaining 8 -- --model gpt-5.4-mini
+  codex-safe --sandbox workspace-write --ask-for-approval on-request
+EOF
+}
+
+remaining="${CODEX_GUARD_REMAINING_PERCENT:-5}"
+interval="${CODEX_GUARD_POLL_SECONDS:-15}"
+grace="${CODEX_GUARD_GRACE_SECONDS:-20}"
+codex_home="${CODEX_GUARD_CODEX_HOME:-${CODEX_HOME:-$HOME/.codex}}"
+guard_log="${CODEX_GUARD_LOG:-$codex_home/codex-guard.log}"
+dry_run=0
+
+while (($#)); do
+  case "$1" in
+    --remaining)
+      [[ $# -ge 2 ]] || { echo "codex-guard: --remaining requires a value" >&2; exit 2; }
+      remaining="$2"
+      shift 2
+      ;;
+    --interval)
+      [[ $# -ge 2 ]] || { echo "codex-guard: --interval requires a value" >&2; exit 2; }
+      interval="$2"
+      shift 2
+      ;;
+    --grace)
+      [[ $# -ge 2 ]] || { echo "codex-guard: --grace requires a value" >&2; exit 2; }
+      grace="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+require_number() {
+  local name="$1"
+  local value="$2"
+  awk -v v="$value" 'BEGIN { exit !(v ~ /^[0-9]+([.][0-9]+)?$/) }' || {
+    echo "codex-guard: $name must be a non-negative number" >&2
+    exit 2
+  }
+}
+
+require_number "--remaining" "$remaining"
+require_number "--interval" "$interval"
+require_number "--grace" "$grace"
+
+command -v codex >/dev/null 2>&1 || { echo "codex-guard: codex not found on PATH" >&2; exit 127; }
+command -v jq >/dev/null 2>&1 || { echo "codex-guard: jq is required" >&2; exit 127; }
+
+sessions_dir="$codex_home/sessions"
+mkdir -p "$(dirname "$guard_log")" 2>/dev/null || true
+
+log() {
+  { printf '%s %s\n' "$(date -Is)" "$*"; } 2>/dev/null >>"$guard_log" || true
+}
+
+limit_used_floor="$(awk -v r="$remaining" 'BEGIN { printf "%.6f", 100 - r }')"
+
+latest_limits() {
+  [[ -d "$sessions_dir" ]] || return 1
+
+  local files=()
+  mapfile -t files < <(
+    find "$sessions_dir" -type f -name 'rollout-*.jsonl' -printf '%T@ %p\n' 2>/dev/null |
+      sort -nr |
+      head -30 |
+      cut -d' ' -f2-
+  )
+
+  ((${#files[@]})) || return 1
+
+  grep -h '"token_count"' "${files[@]}" 2>/dev/null |
+    jq -Rr '
+      fromjson? |
+      select(.type == "event_msg") |
+      select(.payload.type == "token_count") |
+      select(.payload.rate_limits != null) |
+      .payload.rate_limits as $r |
+      [
+        (.timestamp // ""),
+        ($r.primary.used_percent // ""),
+        ($r.primary.window_minutes // ""),
+        ($r.primary.resets_at // ""),
+        ($r.secondary.used_percent // ""),
+        ($r.secondary.window_minutes // ""),
+        ($r.secondary.resets_at // "")
+      ] | @tsv
+    ' |
+    sort |
+    tail -1
+}
+
+window_active() {
+  local reset="$1"
+  [[ -n "$reset" ]] || return 0
+
+  local now
+  now="$(date +%s)"
+  awk -v reset="$reset" -v now="$now" 'BEGIN { exit !(reset > now) }'
+}
+
+breach_line() {
+  local row="$1"
+  [[ -n "$row" ]] || return 1
+
+  local ts p_used p_window p_reset s_used s_window s_reset
+  IFS=$'\t' read -r ts p_used p_window p_reset s_used s_window s_reset <<<"$row"
+
+  local five_used="" five_reset="" week_used="" week_reset=""
+
+  case "$p_window" in
+    300) five_used="$p_used"; five_reset="$p_reset" ;;
+    10080) week_used="$p_used"; week_reset="$p_reset" ;;
+  esac
+
+  case "$s_window" in
+    300) five_used="$s_used"; five_reset="$s_reset" ;;
+    10080) week_used="$s_used"; week_reset="$s_reset" ;;
+  esac
+
+  if [[ -n "$five_used" ]] && window_active "$five_reset"; then
+    if awk -v used="$five_used" -v floor="$limit_used_floor" 'BEGIN { exit !(used >= floor) }'; then
+      printf 'five-hour limit used %.1f%%; remaining %.1f%% or less' "$five_used" "$remaining"
+      return 0
+    fi
+  fi
+
+  if [[ -n "$week_used" ]] && window_active "$week_reset"; then
+    if awk -v used="$week_used" -v floor="$limit_used_floor" 'BEGIN { exit !(used >= floor) }'; then
+      printf 'weekly limit used %.1f%%; remaining %.1f%% or less' "$week_used" "$remaining"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+preflight_row="$(latest_limits || true)"
+if reason="$(breach_line "$preflight_row")"; then
+  echo "codex-guard: refusing to start Codex: $reason" >&2
+  log "refused start: $reason"
+  exit 3
+fi
+
+echo "codex-guard: watching Codex limits; stop floor is ${remaining}% remaining." >&2
+log "starting codex guard: remaining=${remaining}% interval=${interval}s args=$*"
+
+codex_pid=$$
+codex_start_ticks="$(awk '{print $22}' "/proc/$codex_pid/stat" 2>/dev/null || true)"
+
+target_alive() {
+  [[ -d "/proc/$codex_pid" ]] || return 1
+
+  if [[ -n "$codex_start_ticks" ]]; then
+    local current_start_ticks
+    current_start_ticks="$(awk '{print $22}' "/proc/$codex_pid/stat" 2>/dev/null || true)"
+    [[ "$current_start_ticks" == "$codex_start_ticks" ]] || return 1
+  fi
+
+  return 0
+}
+
+stop_codex() {
+  local reason="$1"
+  local message="codex-guard: stopping Codex PID $codex_pid: $reason"
+  echo "$message" >&2
+  log "$message"
+
+  if ((dry_run)); then
+    echo "codex-guard: dry-run enabled; Codex is still running." >&2
+    return 0
+  fi
+
+  kill -INT "$codex_pid" 2>/dev/null || true
+  sleep "$grace"
+
+  if kill -0 "$codex_pid" 2>/dev/null; then
+    kill -TERM "$codex_pid" 2>/dev/null || true
+    sleep 5
+  fi
+
+  if kill -0 "$codex_pid" 2>/dev/null; then
+    kill -KILL "$codex_pid" 2>/dev/null || true
+  fi
+}
+
+monitor() {
+  trap '' INT
+
+  while target_alive; do
+    local row reason
+    row="$(latest_limits || true)"
+
+    if reason="$(breach_line "$row")"; then
+      stop_codex "$reason"
+      return 0
+    fi
+
+    sleep "$interval"
+  done
+}
+
+monitor &
+monitor_pid=$!
+
+exec codex "$@"
+codex_status=$?
+kill "$monitor_pid" 2>/dev/null || true
+log "failed to exec codex: status=$codex_status"
+exit "$codex_status"

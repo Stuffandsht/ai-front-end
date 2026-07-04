@@ -1,0 +1,88 @@
+services:
+  app:
+    profiles:
+      - dev
+      - single-company
+      - multi-tenant
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    command: npm run dev --workspace @agent-platform/web
+    environment:
+      APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:-single_company}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-true}
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/agent_platform
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-agent-platform}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minio}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minio-password}
+      KMS_PROVIDER: ${KMS_PROVIDER:-local}
+      LOCAL_KMS_MASTER_KEY_BASE64: ${LOCAL_KMS_MASTER_KEY_BASE64:-dev-only-unsafe-master-key-32-bytes!!}
+      SINGLE_COMPANY_TENANT_SLUG: ${SINGLE_COMPANY_TENANT_SLUG:-acme}
+      SINGLE_COMPANY_TENANT_NAME: ${SINGLE_COMPANY_TENANT_NAME:-Acme Internal AI}
+      SINGLE_COMPANY_DEFAULT_RETENTION: ${SINGLE_COMPANY_DEFAULT_RETENTION:-retained}
+      SINGLE_COMPANY_ALLOW_USER_BYO_PROVIDER: ${SINGLE_COMPANY_ALLOW_USER_BYO_PROVIDER:-false}
+      SINGLE_COMPANY_DEFAULT_PROVIDER_ID: ${SINGLE_COMPANY_DEFAULT_PROVIDER_ID:-mock}
+      SINGLE_COMPANY_DEFAULT_MODEL_ID: ${SINGLE_COMPANY_DEFAULT_MODEL_ID:-mock-chat}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+
+  postgres:
+    profiles:
+      - dev
+      - single-company
+      - multi-tenant
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_DB: agent_platform
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U agent -d agent_platform
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    profiles:
+      - dev
+      - single-company
+      - multi-tenant
+    image: docker.io/valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+
+  minio:
+    profiles:
+      - dev
+      - single-company
+      - multi-tenant
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minio}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minio-password}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  postgres-data:
+  minio-data:

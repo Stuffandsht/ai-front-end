@@ -9,6 +9,10 @@ node_modules/
 dist/
 build/
 coverage/
+.next/
+apps/*/.next/
+playwright-report/
+test-results/
 
 *.log
 npm-debug.log*
