@@ -4,7 +4,7 @@ import { getRuntime } from "@/lib/runtime";
 export default async function AuditPage() {
   await requirePagePermission("audit:read");
   const runtime = await getRuntime();
-  const events = runtime.db.snapshot().auditEvents.slice().reverse();
+  const events = (await runtime.db.snapshot()).auditEvents.slice().reverse();
   return (
     <>
       <div className="topline">

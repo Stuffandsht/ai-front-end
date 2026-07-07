@@ -6,14 +6,14 @@ export type WrappedKey = {
   ciphertext: string;
   nonce: string;
   tag: string;
-  algorithm: "aes-256-gcm";
+  algorithm: "aes-256-gcm" | "vault-transit";
 };
 
 export type Ciphertext = {
   ciphertext: string;
   nonce: string;
   tag: string;
-  algorithm: "aes-256-gcm";
+  algorithm: "aes-256-gcm" | "vault-transit";
 };
 
 export type EncryptedBlob = {
@@ -102,15 +102,83 @@ export class VaultTransitKmsProvider implements KmsProvider {
     private readonly config: {
       vaultAddr: string;
       transitKey: string;
+      vaultToken?: string;
+      fetchImpl?: typeof fetch;
     }
-  ) {}
-
-  async wrapKey(_args: { keyPlaintext: Uint8Array; context: Record<string, string> }): Promise<WrappedKey> {
-    throw new Error(`Vault Transit KMS adapter configured for ${this.config.vaultAddr}/${this.config.transitKey}, but network calls are not implemented in this skeleton`);
+  ) {
+    this.fetchImpl = config.fetchImpl ?? fetch;
   }
 
-  async unwrapKey(_args: { wrappedKey: WrappedKey; context: Record<string, string> }): Promise<Uint8Array> {
-    throw new Error(`Vault Transit KMS adapter configured for ${this.config.vaultAddr}/${this.config.transitKey}, but network calls are not implemented in this skeleton`);
+  private readonly fetchImpl: typeof fetch;
+  readonly provider = "vault_transit";
+
+  async wrapKey(args: { keyPlaintext: Uint8Array; context: Record<string, string> }): Promise<WrappedKey> {
+    const ciphertext = await this.encryptWithTransit(Buffer.from(args.keyPlaintext), args.context);
+    return {
+      provider: this.provider,
+      keyId: this.config.transitKey,
+      ciphertext,
+      nonce: "",
+      tag: "",
+      algorithm: "vault-transit"
+    };
+  }
+
+  async unwrapKey(args: { wrappedKey: WrappedKey; context: Record<string, string> }): Promise<Uint8Array> {
+    return this.decryptWithTransit(args.wrappedKey.ciphertext, args.context);
+  }
+
+  async encrypt(args: { plaintext: Uint8Array; context: Record<string, string> }): Promise<Ciphertext> {
+    return {
+      ciphertext: await this.encryptWithTransit(Buffer.from(args.plaintext), args.context),
+      nonce: "",
+      tag: "",
+      algorithm: "vault-transit"
+    };
+  }
+
+  async decrypt(args: { ciphertext: Ciphertext; context: Record<string, string> }): Promise<Uint8Array> {
+    return this.decryptWithTransit(args.ciphertext.ciphertext, args.context);
+  }
+
+  private async encryptWithTransit(plaintext: Uint8Array, context: Record<string, string>): Promise<string> {
+    const payload = await this.postTransit<{ data?: { ciphertext?: string } }>("encrypt", {
+      plaintext: Buffer.from(plaintext).toString("base64"),
+      context: Buffer.from(canonicalAad(context)).toString("base64")
+    });
+    const ciphertext = payload.data?.ciphertext;
+    if (!ciphertext) {
+      throw new Error("Vault Transit encrypt response did not include ciphertext");
+    }
+    return ciphertext;
+  }
+
+  private async decryptWithTransit(ciphertext: string, context: Record<string, string>): Promise<Uint8Array> {
+    const payload = await this.postTransit<{ data?: { plaintext?: string } }>("decrypt", {
+      ciphertext,
+      context: Buffer.from(canonicalAad(context)).toString("base64")
+    });
+    const plaintext = payload.data?.plaintext;
+    if (!plaintext) {
+      throw new Error("Vault Transit decrypt response did not include plaintext");
+    }
+    return Buffer.from(plaintext, "base64");
+  }
+
+  private async postTransit<T>(operation: "encrypt" | "decrypt", body: Record<string, string>): Promise<T> {
+    const response = await this.fetchImpl(`${this.config.vaultAddr.replace(/\/$/, "")}/v1/transit/${operation}/${encodeURIComponent(this.config.transitKey)}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(this.config.vaultToken ? { "x-vault-token": this.config.vaultToken } : {})
+      },
+      body: JSON.stringify(body)
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`Vault Transit ${operation} failed with HTTP ${response.status}: ${text.slice(0, 500)}`);
+    }
+    return JSON.parse(text) as T;
   }
 }
 
@@ -170,7 +238,7 @@ export class EnvelopeContentCrypto implements ContentCrypto {
       contentTag: encrypted.tag,
       contentKeyId: key.id,
       contentHash: hmacContentHash(Buffer.from(dek), plaintextBytes),
-      algorithm: encrypted.algorithm
+      algorithm: "aes-256-gcm"
     };
   }
 

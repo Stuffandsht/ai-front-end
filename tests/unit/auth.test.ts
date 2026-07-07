@@ -1,13 +1,19 @@
+import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  buildOidcAuthorizationUrl,
   createCallbackState,
   developmentAuthAllowed,
+  exchangeOidcCode,
+  fetchOidcDiscovery,
+  fetchOidcJwks,
   microsoftEntraPreset,
   provisionIdentityFromClaims,
   authorizeRole,
   validateCallbackState,
   validateIdTokenClaims,
-  validateOidcDiscovery
+  validateOidcDiscovery,
+  verifyOidcIdToken
 } from "@agent-platform/auth";
 import { testConfig } from "@agent-platform/test-utils";
 
@@ -139,6 +145,59 @@ describe("auth and OIDC helpers", () => {
     ).toMatchObject({ ok: false, code: "STATE_CONTEXT_MISMATCH" });
   });
 
+  it("performs OIDC discovery, token exchange, JWKS fetch, and signed ID token verification", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const jwk = publicKey.export({ format: "jwk" }) as JsonWebKey & { kid?: string };
+    jwk.kid = "kid_1";
+    const config = microsoftEntraPreset({
+      tenantId: "tenant_1",
+      entraTenantId: "entra-tenant",
+      clientId: "client-id",
+      clientSecretRef: "env://OIDC_CLIENT_SECRET",
+      callbackUrl: "http://localhost/callback",
+      allowedEmailDomains: ["example.com"]
+    });
+    const idToken = signJwt(
+      {
+        alg: "RS256",
+        kid: "kid_1"
+      },
+      {
+        iss: config.issuerUrl,
+        aud: "client-id",
+        sub: "subject",
+        exp: 200,
+        email: "person@example.com"
+      },
+      privateKey
+    );
+    const fetchImpl: typeof fetch = async (url, init) => {
+      const target = String(url);
+      if (target.endsWith("/.well-known/openid-configuration")) {
+        return new Response(
+          JSON.stringify({
+            issuer: config.issuerUrl,
+            authorization_endpoint: "https://login.example/authorize",
+            token_endpoint: "https://login.example/token",
+            jwks_uri: "https://login.example/jwks",
+            response_types_supported: ["code"]
+          })
+        );
+      }
+      if (target === "https://login.example/token") {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify({ id_token: idToken, token_type: "Bearer" }));
+      }
+      return new Response(JSON.stringify({ keys: [jwk] }));
+    };
+
+    const discovery = await fetchOidcDiscovery(config, fetchImpl);
+    expect(buildOidcAuthorizationUrl(config, discovery, { state: "state", nonce: "nonce" })).toContain("response_type=code");
+    const token = await exchangeOidcCode(config, discovery, { code: "code", clientSecret: "secret" }, fetchImpl);
+    const jwks = await fetchOidcJwks(discovery, fetchImpl);
+    expect(verifyOidcIdToken(config, token.id_token ?? "", jwks, 100).email).toBe("person@example.com");
+  });
+
   it("maps claims to a provisioned identity and app roles", () => {
     const config = microsoftEntraPreset({
       tenantId: "tenant_1",
@@ -202,3 +261,12 @@ describe("auth and OIDC helpers", () => {
     });
   });
 });
+
+function signJwt(header: Record<string, unknown>, payload: Record<string, unknown>, privateKey: KeyObject): string {
+  const encodedHeader = Buffer.from(JSON.stringify(header), "utf8").toString("base64url");
+  const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signer = createSign("RSA-SHA256");
+  signer.update(`${encodedHeader}.${encodedPayload}`);
+  signer.end();
+  return `${encodedHeader}.${encodedPayload}.${signer.sign(privateKey).toString("base64url")}`;
+}

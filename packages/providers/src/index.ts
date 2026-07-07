@@ -155,15 +155,18 @@ export class OpenAICompatibleProvider implements InferenceProvider {
       id: string;
       baseUrl: string;
       apiKey: string;
+      fetchImpl?: typeof fetch;
     }
   ) {
     this.id = args.id;
-    this.baseUrl = args.baseUrl.replace(/\/$/, "");
+    this.baseUrl = validateProviderBaseUrl(args.baseUrl).replace(/\/$/, "");
     this.apiKey = args.apiKey;
+    this.fetchImpl = args.fetchImpl ?? fetch;
   }
 
   private readonly baseUrl: string;
   private readonly apiKey: string;
+  private readonly fetchImpl: typeof fetch;
 
   buildChatRequest(args: ChatCompletionRequest): {
     url: string;
@@ -178,8 +181,8 @@ export class OpenAICompatibleProvider implements InferenceProvider {
       init: {
         method: "POST",
         headers: {
-          authorization: `Bearer ${this.apiKey}`,
-          "content-type": "application/json"
+          "content-type": "application/json",
+          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
         },
         body: JSON.stringify({
           model: args.modelId,
@@ -204,8 +207,18 @@ export class OpenAICompatibleProvider implements InferenceProvider {
     };
   }
 
-  async completeChat(_args: ChatCompletionRequest): Promise<ChatCompletionResult> {
-    throw this.redactError(new Error("OpenAI-compatible network execution is disabled without configured credentials and fetch wiring"));
+  async completeChat(args: ChatCompletionRequest): Promise<ChatCompletionResult> {
+    const request = this.buildChatRequest(args);
+    try {
+      const response = await this.fetchImpl(request.url, request.init);
+      const bodyText = await response.text();
+      if (!response.ok) {
+        throw new Error(`OpenAI-compatible provider returned HTTP ${response.status}: ${safeErrorBody(bodyText)}`);
+      }
+      return openAiChatResponseToResult(JSON.parse(bodyText) as OpenAIChatResponse);
+    } catch (error) {
+      throw this.redactError(error);
+    }
   }
 
   async *streamChat(args: ChatCompletionRequest): AsyncIterable<ChatCompletionStreamEvent> {
@@ -218,8 +231,100 @@ export class OpenAICompatibleProvider implements InferenceProvider {
 
   redactError(error: unknown): Error {
     const message = error instanceof Error ? error.message : String(error);
-    return new Error(message.replaceAll(this.apiKey, "[redacted]").replaceAll(this.baseUrl, this.baseUrl));
+    return new Error(this.apiKey ? message.replaceAll(this.apiKey, "[redacted]") : message);
   }
+}
+
+type OpenAIChatResponse = {
+  id?: string;
+  model?: string;
+  choices?: Array<{
+    finish_reason?: string;
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+      tool_calls?: Array<{
+        id?: string;
+        function?: {
+          name?: string;
+          arguments?: string;
+        };
+      }>;
+    };
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+  };
+};
+
+function openAiChatResponseToResult(payload: OpenAIChatResponse): ChatCompletionResult {
+  const choice = payload.choices?.[0];
+  const message = choice?.message;
+  const content = typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.flatMap((part) => (part.text ? [part.text] : [])).join("") : "";
+  return {
+    content,
+    toolCalls:
+      message?.tool_calls?.flatMap((toolCall, index) => {
+        const toolId = toolCall.function?.name;
+        if (!toolId) {
+          return [];
+        }
+        return [
+          {
+            id: toolCall.id ?? `toolcall_${index}`,
+            toolId,
+            args: parseToolArguments(toolCall.function?.arguments)
+          }
+        ];
+      }) ?? [],
+    usage: {
+      inputTokens: payload.usage?.prompt_tokens ?? payload.usage?.input_tokens ?? 0,
+      outputTokens: payload.usage?.completion_tokens ?? payload.usage?.output_tokens ?? 0
+    },
+    providerMetadata: {
+      provider: "openai_compatible",
+      responseId: payload.id ?? null,
+      model: payload.model ?? null,
+      finishReason: choice?.finish_reason ?? null
+    }
+  };
+}
+
+function parseToolArguments(value: string | undefined): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function validateProviderBaseUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Provider base URL must use http or https");
+  }
+  return url.toString();
+}
+
+function safeErrorBody(value: string): string {
+  if (!value) {
+    return "empty response body";
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === "object" && "error" in parsed) {
+      return JSON.stringify(scrubSecrets(parsed));
+    }
+  } catch {
+    // Fall through to truncating the raw response.
+  }
+  return value.slice(0, 500);
 }
 
 export type ProviderGatewayResult = {

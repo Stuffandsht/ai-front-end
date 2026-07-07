@@ -25,7 +25,7 @@ export async function authorizedJson<T>(permission: Permission, handler: ApiHand
   return json(async () => {
     const runtime = await getRuntime();
     const user = await requireCurrentUser();
-    const membership = runtime.db.getMembership(runtime.tenant.id, user.id);
+    const membership = await runtime.db.getMembership(runtime.tenant.id, user.id);
     if (!membership) {
       throw new Error("Forbidden: user has no tenant membership");
     }

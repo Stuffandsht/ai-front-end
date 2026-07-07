@@ -4,7 +4,7 @@ import { getRuntime } from "@/lib/runtime";
 export async function GET() {
   return authorizedJson("provider:configure_tenant", async () => {
     const runtime = await getRuntime();
-    return runtime.db.snapshot().modelConfigs;
+    return (await runtime.db.snapshot()).modelConfigs;
   });
 }
 
@@ -12,7 +12,7 @@ export async function POST(request: Request) {
   return authorizedJson("provider:configure_tenant", async () => {
     const runtime = await getRuntime();
     const body = await request.json() as Record<string, unknown>;
-    return runtime.db.createModelConfig({
+    const model = await runtime.db.createModelConfig({
       tenantId: runtime.tenant.id,
       providerConfigId: String(body["providerConfigId"] ?? "mock"),
       modelKey: String(body["modelKey"] ?? "custom-model"),
@@ -26,5 +26,7 @@ export async function POST(request: Request) {
       outputModalitiesJson: ["text"],
       enabled: true
     });
+    await runtime.refreshAdminState();
+    return model;
   });
 }

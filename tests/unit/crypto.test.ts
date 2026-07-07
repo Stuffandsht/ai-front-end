@@ -21,8 +21,23 @@ describe("content crypto", () => {
     ).resolves.toBe(plaintext);
   });
 
-  it("includes a production KMS adapter interface placeholder", async () => {
-    const kms = new VaultTransitKmsProvider({ vaultAddr: "https://vault.example", transitKey: "agent-platform" });
-    await expect(kms.wrapKey({ keyPlaintext: new Uint8Array(32), context: {} })).rejects.toThrow("Vault Transit KMS adapter");
+  it("wraps and unwraps keys through the Vault Transit adapter", async () => {
+    const kms = new VaultTransitKmsProvider({
+      vaultAddr: "https://vault.example",
+      transitKey: "agent-platform",
+      vaultToken: "vault-token",
+      fetchImpl: async (url, init) => {
+        const body = JSON.parse(String(init?.body)) as { plaintext?: string; ciphertext?: string };
+        if (String(url).includes("/encrypt/")) {
+          return new Response(JSON.stringify({ data: { ciphertext: `vault:v1:${body.plaintext ?? ""}` } }));
+        }
+        return new Response(JSON.stringify({ data: { plaintext: String(body.ciphertext ?? "").replace("vault:v1:", "") } }));
+      }
+    });
+    const keyPlaintext = new Uint8Array(32).fill(7);
+    const wrapped = await kms.wrapKey({ keyPlaintext, context: { tenant_id: "tenant_1" } });
+    const unwrapped = await kms.unwrapKey({ wrappedKey: wrapped, context: { tenant_id: "tenant_1" } });
+    expect(wrapped.provider).toBe("vault_transit");
+    expect([...unwrapped]).toEqual([...keyPlaintext]);
   });
 });

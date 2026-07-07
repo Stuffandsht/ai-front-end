@@ -470,6 +470,28 @@ export class InMemoryDatabase {
     return provider;
   }
 
+  listIdentityProviders(tenantId: string): IdentityProvider[] {
+    return this.snapshotData.identityProviders.filter((provider) => provider.tenantId === tenantId && provider.deletedAt == null);
+  }
+
+  async updateIdentityProvider(
+    id: string,
+    input: Partial<Pick<IdentityProvider, "issuerUrl" | "clientId" | "clientSecretRef" | "allowedEmailDomains" | "claimMappingJson" | "enabled">>
+  ): Promise<IdentityProvider | null> {
+    const provider = this.snapshotData.identityProviders.find((item) => item.id === id && item.deletedAt == null);
+    if (!provider) {
+      return null;
+    }
+    provider.issuerUrl = input.issuerUrl ?? provider.issuerUrl;
+    provider.clientId = input.clientId ?? provider.clientId;
+    provider.clientSecretRef = input.clientSecretRef ?? provider.clientSecretRef;
+    provider.allowedEmailDomains = input.allowedEmailDomains ?? provider.allowedEmailDomains;
+    provider.claimMappingJson = input.claimMappingJson ?? provider.claimMappingJson;
+    provider.enabled = input.enabled ?? provider.enabled;
+    provider.updatedAt = new Date();
+    return provider;
+  }
+
   async createProviderConfig(input: Omit<ProviderConfig, keyof TimestampedTenantRecord | "id"> & { tenantId: string }): Promise<ProviderConfig> {
     const provider: ProviderConfig = {
       ...tenantRecord(input.tenantId),
@@ -492,6 +514,53 @@ export class InMemoryDatabase {
     return provider;
   }
 
+  async updateProviderConfig(
+    id: string,
+    input: Partial<
+      Pick<
+        ProviderConfig,
+        | "displayName"
+        | "baseUrl"
+        | "authMode"
+        | "credentialRef"
+        | "retentionPolicyClass"
+        | "supportsStreaming"
+        | "supportsToolCalling"
+        | "supportsJsonSchema"
+        | "supportsEmbeddings"
+        | "enabled"
+      >
+    >
+  ): Promise<ProviderConfig | null> {
+    const provider = this.snapshotData.providerConfigs.find((item) => item.id === id && item.deletedAt == null);
+    if (!provider) {
+      return null;
+    }
+    provider.displayName = input.displayName ?? provider.displayName;
+    provider.baseUrl = input.baseUrl ?? provider.baseUrl;
+    provider.authMode = input.authMode ?? provider.authMode;
+    provider.credentialRef = input.credentialRef ?? provider.credentialRef;
+    provider.retentionPolicyClass = input.retentionPolicyClass ?? provider.retentionPolicyClass;
+    provider.supportsStreaming = input.supportsStreaming ?? provider.supportsStreaming;
+    provider.supportsToolCalling = input.supportsToolCalling ?? provider.supportsToolCalling;
+    provider.supportsJsonSchema = input.supportsJsonSchema ?? provider.supportsJsonSchema;
+    provider.supportsEmbeddings = input.supportsEmbeddings ?? provider.supportsEmbeddings;
+    provider.enabled = input.enabled ?? provider.enabled;
+    provider.updatedAt = new Date();
+    return provider;
+  }
+
+  async deleteProviderConfig(id: string): Promise<ProviderConfig | null> {
+    const provider = this.snapshotData.providerConfigs.find((item) => item.id === id && item.deletedAt == null);
+    if (!provider) {
+      return null;
+    }
+    provider.enabled = false;
+    provider.deletedAt = new Date();
+    provider.updatedAt = provider.deletedAt;
+    return provider;
+  }
+
   async createModelConfig(input: Omit<ModelConfig, keyof TimestampedTenantRecord | "id"> & { tenantId: string }): Promise<ModelConfig> {
     const model: ModelConfig = {
       ...tenantRecord(input.tenantId),
@@ -509,6 +578,40 @@ export class InMemoryDatabase {
       enabled: input.enabled
     };
     this.snapshotData.modelConfigs.push(model);
+    return model;
+  }
+
+  async updateModelConfig(
+    id: string,
+    input: Partial<
+      Pick<
+        ModelConfig,
+        | "displayName"
+        | "contextWindow"
+        | "maxOutputTokens"
+        | "supportsTools"
+        | "supportsStreaming"
+        | "supportsJsonSchema"
+        | "inputModalitiesJson"
+        | "outputModalitiesJson"
+        | "enabled"
+      >
+    >
+  ): Promise<ModelConfig | null> {
+    const model = this.snapshotData.modelConfigs.find((item) => item.id === id && item.deletedAt == null);
+    if (!model) {
+      return null;
+    }
+    model.displayName = input.displayName ?? model.displayName;
+    model.contextWindow = input.contextWindow ?? model.contextWindow;
+    model.maxOutputTokens = input.maxOutputTokens ?? model.maxOutputTokens;
+    model.supportsTools = input.supportsTools ?? model.supportsTools;
+    model.supportsStreaming = input.supportsStreaming ?? model.supportsStreaming;
+    model.supportsJsonSchema = input.supportsJsonSchema ?? model.supportsJsonSchema;
+    model.inputModalitiesJson = input.inputModalitiesJson ?? model.inputModalitiesJson;
+    model.outputModalitiesJson = input.outputModalitiesJson ?? model.outputModalitiesJson;
+    model.enabled = input.enabled ?? model.enabled;
+    model.updatedAt = new Date();
     return model;
   }
 
@@ -533,6 +636,38 @@ export class InMemoryDatabase {
     };
     this.snapshotData.providerCredentials.push(credential);
     return credential;
+  }
+
+  listProviderCredentials(tenantId: string): ProviderCredential[] {
+    return this.snapshotData.providerCredentials.filter((credential) => credential.tenantId === tenantId && credential.deletedAt == null);
+  }
+
+  async readProviderCredentialSecret(credential: ProviderCredential): Promise<string> {
+    const plaintext = await this.contentCrypto.decryptForTenant({
+      tenantId: credential.tenantId,
+      blob: credential.credentialCiphertext,
+      aad: {
+        record_type: "provider_credential",
+        provider_config_id: credential.providerConfigId,
+        credential_ref: credential.credentialRef
+      }
+    });
+    return String(plaintext);
+  }
+
+  async getProviderCredentialSecret(input: { tenantId: string; providerConfigId: string; userId?: string | null; credentialRef?: string | null }): Promise<string | null> {
+    const credential =
+      this.snapshotData.providerCredentials
+        .filter(
+          (item) =>
+            item.tenantId === input.tenantId &&
+            item.providerConfigId === input.providerConfigId &&
+            item.deletedAt == null &&
+            (input.userId == null ? item.userId == null : item.userId === input.userId) &&
+            (input.credentialRef == null || item.credentialRef === input.credentialRef)
+        )
+        .at(-1) ?? null;
+    return credential ? this.readProviderCredentialSecret(credential) : null;
   }
 
   listProviderConfigs(tenantId: string): ProviderConfig[] {
@@ -599,6 +734,79 @@ export class InMemoryDatabase {
     };
     this.snapshotData.promptFragments.push(fragment);
     this.snapshotData.promptFragmentVersions.push(version);
+    return fragment;
+  }
+
+  async updatePromptFragment(
+    id: string,
+    input: {
+      name?: string;
+      content?: string;
+      priority?: number;
+      enabled?: boolean;
+      updatedBy: string;
+    }
+  ): Promise<PromptFragment | null> {
+    const fragment = this.snapshotData.promptFragments.find((item) => item.id === id && item.deletedAt == null);
+    if (!fragment) {
+      return null;
+    }
+    const nextName = input.name ?? fragment.name;
+    const needsReencrypt = input.content != null || input.name != null;
+    const nextContent =
+      input.content ??
+      (needsReencrypt
+        ? await this.contentCrypto.decryptForTenant({
+            tenantId: fragment.tenantId,
+            blob: fragment.contentCiphertext,
+            aad: {
+              record_type: "prompt_fragment",
+              scope_type: fragment.scopeType,
+              scope_id: fragment.scopeId,
+              name: fragment.name
+            }
+          })
+        : null);
+    if (needsReencrypt) {
+      const encrypted = await this.contentCrypto.encryptForTenant({
+        tenantId: fragment.tenantId,
+        plaintext: String(nextContent ?? ""),
+        purpose: "prompt",
+        aad: {
+          record_type: "prompt_fragment",
+          scope_type: fragment.scopeType,
+          scope_id: fragment.scopeId,
+          name: nextName
+        }
+      });
+      fragment.contentCiphertext = encrypted;
+      fragment.contentHash = encrypted.contentHash;
+      fragment.version += 1;
+      this.snapshotData.promptFragmentVersions.push({
+        ...tenantRecord(fragment.tenantId),
+        id: this.nextId("prompt_version"),
+        promptFragmentId: fragment.id,
+        version: fragment.version,
+        contentCiphertext: encrypted,
+        contentHash: encrypted.contentHash,
+        createdBy: input.updatedBy
+      });
+    }
+    fragment.name = nextName;
+    fragment.priority = input.priority ?? fragment.priority;
+    fragment.enabled = input.enabled ?? fragment.enabled;
+    fragment.updatedAt = new Date();
+    return fragment;
+  }
+
+  async deletePromptFragment(id: string): Promise<PromptFragment | null> {
+    const fragment = this.snapshotData.promptFragments.find((item) => item.id === id && item.deletedAt == null);
+    if (!fragment) {
+      return null;
+    }
+    fragment.enabled = false;
+    fragment.deletedAt = new Date();
+    fragment.updatedAt = fragment.deletedAt;
     return fragment;
   }
 
@@ -735,6 +943,50 @@ export class InMemoryDatabase {
     return output;
   }
 
+  async upsertRetentionPolicy(input: {
+    tenantId: string;
+    subjectType: RetentionPolicyRecord["subjectType"];
+    subjectId: string;
+    defaultRetentionMode: RetentionPolicyRecord["defaultRetentionMode"];
+    mandatoryRetentionMode?: RetentionPolicyRecord["mandatoryRetentionMode"];
+  }): Promise<RetentionPolicyRecord> {
+    const existing = this.snapshotData.retentionPolicies.find(
+      (policy) =>
+        policy.tenantId === input.tenantId &&
+        policy.subjectType === input.subjectType &&
+        policy.subjectId === input.subjectId &&
+        policy.deletedAt == null
+    );
+    if (existing) {
+      existing.defaultRetentionMode = input.defaultRetentionMode;
+      existing.mandatoryRetentionMode = input.mandatoryRetentionMode ?? null;
+      existing.updatedAt = new Date();
+      return existing;
+    }
+    const policy: RetentionPolicyRecord = {
+      ...tenantRecord(input.tenantId),
+      id: this.nextId("retention_policy"),
+      subjectType: input.subjectType,
+      subjectId: input.subjectId,
+      defaultRetentionMode: input.defaultRetentionMode,
+      mandatoryRetentionMode: input.mandatoryRetentionMode ?? null
+    };
+    this.snapshotData.retentionPolicies.push(policy);
+    return policy;
+  }
+
+  async getRetentionPolicy(input: { tenantId: string; subjectType: RetentionPolicyRecord["subjectType"]; subjectId: string }): Promise<RetentionPolicyRecord | null> {
+    return (
+      this.snapshotData.retentionPolicies.find(
+        (policy) =>
+          policy.tenantId === input.tenantId &&
+          policy.subjectType === input.subjectType &&
+          policy.subjectId === input.subjectId &&
+          policy.deletedAt == null
+      ) ?? null
+    );
+  }
+
   async createToolInvocation(input: {
     tenantId: string;
     userId: string;
@@ -820,7 +1072,7 @@ export class InMemoryDatabase {
     return server;
   }
 
-  async createPluginInstallation(input: Omit<PluginInstallation, keyof TimestampedTenantRecord | "id"> & { tenantId: string; config?: string | null }): Promise<PluginInstallation> {
+  async createPluginInstallation(input: Omit<PluginInstallation, keyof TimestampedTenantRecord | "id" | "configCiphertext"> & { tenantId: string; config?: string | null }): Promise<PluginInstallation> {
     const configCiphertext =
       input.config && input.config.length > 0
         ? await this.contentCrypto.encryptForTenant({
@@ -846,6 +1098,17 @@ export class InMemoryDatabase {
       approvedBy: input.approvedBy
     };
     this.snapshotData.pluginInstallations.push(installation);
+    return installation;
+  }
+
+  async updatePluginInstallation(id: string, input: { enabled?: boolean; approvedBy?: string | null }): Promise<PluginInstallation | null> {
+    const installation = this.snapshotData.pluginInstallations.find((item) => item.id === id && item.deletedAt == null);
+    if (!installation) {
+      return null;
+    }
+    installation.enabled = input.enabled ?? installation.enabled;
+    installation.approvedBy = input.approvedBy ?? installation.approvedBy;
+    installation.updatedAt = new Date();
     return installation;
   }
 
@@ -944,3 +1207,4 @@ export function tenantRecord(tenantId: string): TimestampedTenantRecord {
 }
 
 export * from "./sql";
+export * from "./postgres";

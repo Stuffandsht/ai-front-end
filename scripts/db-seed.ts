@@ -1,8 +1,9 @@
 import { readAppConfig } from "@agent-platform/config";
-import { createLocalRuntime } from "@agent-platform/runtime";
+import { createRuntime } from "@agent-platform/runtime";
 
-const services = await createLocalRuntime(readAppConfig());
-const tenants = services.db.listTenants();
+const services = await createRuntime(readAppConfig());
+const tenants = await services.db.listTenants();
+const snapshot = await services.db.snapshot();
 
 console.log(
   JSON.stringify(
@@ -17,8 +18,9 @@ console.log(
         id: services.devUser.id,
         email: services.devUser.email
       },
-      providerCount: services.db.snapshot().providerConfigs.length,
-      promptCount: services.db.snapshot().promptFragments.length
+      databaseMode: services.config.databaseMode,
+      providerCount: snapshot.providerConfigs.length,
+      promptCount: snapshot.promptFragments.length
     },
     null,
     2

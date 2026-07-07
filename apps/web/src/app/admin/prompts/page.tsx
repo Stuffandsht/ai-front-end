@@ -4,7 +4,7 @@ import { getRuntime } from "@/lib/runtime";
 export default async function PromptsPage() {
   await requirePagePermission("prompt:configure_tenant");
   const runtime = await getRuntime();
-  const prompts = runtime.db.snapshot().promptFragments;
+  const prompts = (await runtime.db.snapshot()).promptFragments;
   return (
     <>
       <div className="topline">

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compileEffectivePolicy } from "@agent-platform/policy";
 import { compilePromptStack } from "@agent-platform/prompts";
 import { buildRetentionContext } from "@agent-platform/retention";
-import { MockProvider, ProviderGateway } from "@agent-platform/providers";
+import { MockProvider, OpenAICompatibleProvider, ProviderGateway } from "@agent-platform/providers";
 import { createTestRuntime } from "@agent-platform/test-utils";
 import { HttpMcpTransportAdapter, StdioMcpTransportAdapter } from "@agent-platform/mcp-gateway";
 
@@ -63,6 +63,83 @@ describe("provider gateway", () => {
         selectedProviderId: "disallowed"
       })
     ).toThrow("not allowed");
+  });
+
+  it("calls an OpenAI-compatible provider and redacts provider errors", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const provider = new OpenAICompatibleProvider({
+      id: "tenant-openai",
+      baseUrl: "https://provider.example/v1",
+      apiKey: "sk-secret",
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          authorization: new Headers(init?.headers).get("authorization")
+        });
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl_1",
+            model: "gpt-compatible",
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: "provider response",
+                  tool_calls: [
+                    {
+                      id: "call_1",
+                      function: {
+                        name: "mock.read_context",
+                        arguments: "{\"query\":\"docs\"}"
+                      }
+                    }
+                  ]
+                }
+              }
+            ],
+            usage: {
+              prompt_tokens: 3,
+              completion_tokens: 4
+            }
+          })
+        );
+      }
+    });
+
+    const result = await provider.completeChat({
+      requestId: "req_openai",
+      tenantId: "tenant_1",
+      userId: "user_1",
+      providerId: "tenant-openai",
+      modelId: "gpt-compatible",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ id: "mock.read_context", description: "Read context" }],
+      retention: buildRetentionContext("retained")
+    });
+
+    expect(requests[0]).toEqual({ url: "https://provider.example/v1/chat/completions", authorization: "Bearer sk-secret" });
+    expect(result.content).toBe("provider response");
+    expect(result.toolCalls[0]?.args).toEqual({ query: "docs" });
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 4 });
+
+    const failing = new OpenAICompatibleProvider({
+      id: "tenant-openai",
+      baseUrl: "https://provider.example/v1",
+      apiKey: "sk-secret",
+      fetchImpl: async () => new Response("bad sk-secret", { status: 401 })
+    });
+    await expect(
+      failing.completeChat({
+        requestId: "req_openai_fail",
+        tenantId: "tenant_1",
+        userId: "user_1",
+        providerId: "tenant-openai",
+        modelId: "gpt-compatible",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+        retention: buildRetentionContext("retained")
+      })
+    ).rejects.toThrow("[redacted]");
   });
 });
 
@@ -140,5 +217,44 @@ describe("mcp gateway", () => {
 
     await expect(http.listTools()).rejects.toThrow("disabled by default");
     await expect(stdio.invokeTool({ toolId: "tool", args: {} })).rejects.toThrow("disabled by default");
+  });
+
+  it("runs enabled HTTP and stdio MCP adapters through constrained JSON protocols", async () => {
+    const http = new HttpMcpTransportAdapter({
+      serverUrl: "https://mcp.example.test",
+      allowExternalExecution: true,
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/tools")) {
+          return new Response(JSON.stringify({ tools: [{ id: "remote.search", name: "Search", description: "Search", riskLevel: "low" }] }));
+        }
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify({ result: { ok: true } }));
+      }
+    });
+    expect(await http.listTools()).toEqual([
+      {
+        id: "remote.search",
+        name: "Search",
+        description: "Search",
+        riskLevel: "low",
+        requiresConfirmation: false
+      }
+    ]);
+    expect(await http.invokeTool({ toolId: "remote.search", args: { query: "policy" } })).toEqual({ ok: true });
+
+    const script = `payload=$(cat)
+case "$payload" in
+  *tools/list*) printf '%s' '{"tools":[{"id":"stdio.echo","name":"Echo","description":"Echo","riskLevel":"low"}]}' ;;
+  *) printf '%s' '{"result":{"ok":true}}' ;;
+esac`;
+    const stdio = new StdioMcpTransportAdapter({
+      command: "/bin/sh",
+      args: ["-c", script],
+      allowLocalProcessExecution: true
+    });
+    expect((await stdio.listTools())[0]?.id).toBe("stdio.echo");
+    expect(await stdio.invokeTool({ toolId: "stdio.echo", args: { text: "hello" } })).toEqual({
+      ok: true
+    });
   });
 });

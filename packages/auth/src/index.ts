@@ -1,4 +1,5 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, createPublicKey, createVerify, timingSafeEqual } from "node:crypto";
+import type { JsonWebKey as NodeJsonWebKey } from "node:crypto";
 import type { AppConfig, DeploymentMode } from "@agent-platform/config";
 import type { IdentityProvider, RoleName } from "@agent-platform/db";
 
@@ -33,6 +34,19 @@ export type OidcDiscoveryDocument = {
   jwks_uri: string;
   response_types_supported?: string[];
   id_token_signing_alg_values_supported?: string[];
+};
+
+export type OidcTokenResponse = {
+  access_token?: string;
+  id_token?: string;
+  token_type?: string;
+  expires_in?: number;
+  error?: string;
+  error_description?: string;
+};
+
+export type OidcJwks = {
+  keys: Array<NodeJsonWebKey & { kid?: string }>;
 };
 
 export type OidcClaims = {
@@ -216,6 +230,71 @@ export function validateOidcDiscovery(config: OidcProviderConfig, discovery: Oid
   return { ok: true };
 }
 
+export async function fetchOidcDiscovery(config: OidcProviderConfig, fetchImpl: typeof fetch = fetch): Promise<OidcDiscoveryDocument> {
+  const response = await fetchImpl(`${normalizeUrl(config.issuerUrl)}/.well-known/openid-configuration`);
+  const payload = await readAuthJson<OidcDiscoveryDocument>(response, "OIDC discovery");
+  const validation = validateOidcDiscovery(config, payload);
+  if (!validation.ok) {
+    throw new Error(validation.message);
+  }
+  return payload;
+}
+
+export function buildOidcAuthorizationUrl(config: OidcProviderConfig, discovery: OidcDiscoveryDocument, args: { state: string; nonce: string }): string {
+  const url = new URL(discovery.authorization_endpoint);
+  url.searchParams.set("client_id", config.clientId);
+  url.searchParams.set("redirect_uri", config.callbackUrl);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", config.scopes.join(" "));
+  url.searchParams.set("state", args.state);
+  url.searchParams.set("nonce", args.nonce);
+  return url.toString();
+}
+
+export async function exchangeOidcCode(
+  config: OidcProviderConfig,
+  discovery: OidcDiscoveryDocument,
+  args: {
+    code: string;
+    clientSecret: string;
+  },
+  fetchImpl: typeof fetch = fetch
+): Promise<OidcTokenResponse> {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: args.code,
+    redirect_uri: config.callbackUrl,
+    client_id: config.clientId
+  });
+  if (args.clientSecret) {
+    body.set("client_secret", args.clientSecret);
+  }
+  const response = await fetchImpl(discovery.token_endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded"
+    },
+    body
+  });
+  const token = await readAuthJson<OidcTokenResponse>(response, "OIDC token exchange");
+  if (token.error) {
+    throw new Error(`OIDC token exchange failed: ${token.error_description ?? token.error}`);
+  }
+  if (!token.id_token) {
+    throw new Error("OIDC token exchange did not return an ID token");
+  }
+  return token;
+}
+
+export async function fetchOidcJwks(discovery: OidcDiscoveryDocument, fetchImpl: typeof fetch = fetch): Promise<OidcJwks> {
+  const response = await fetchImpl(discovery.jwks_uri);
+  const jwks = await readAuthJson<OidcJwks>(response, "OIDC JWKS");
+  if (!Array.isArray(jwks.keys)) {
+    throw new Error("OIDC JWKS response did not include keys");
+  }
+  return jwks;
+}
+
 export function validateIdTokenClaims(config: OidcProviderConfig, claims: OidcClaims, nowEpochSeconds = Math.floor(Date.now() / 1000)): AuthValidationResult {
   if (normalizeUrl(claims.iss) !== normalizeUrl(config.issuerUrl)) {
     return deny("TOKEN_ISSUER_MISMATCH", "ID token issuer does not match configured issuer.");
@@ -238,6 +317,34 @@ export function validateIdTokenClaims(config: OidcProviderConfig, claims: OidcCl
     return deny("EMAIL_DOMAIN_DENIED", "Email domain is not allowed for this identity provider.");
   }
   return { ok: true };
+}
+
+export function verifyOidcIdToken(config: OidcProviderConfig, idToken: string, jwks: OidcJwks, nowEpochSeconds = Math.floor(Date.now() / 1000)): OidcClaims {
+  const [encodedHeader, encodedPayload, encodedSignature] = idToken.split(".");
+  if (!encodedHeader || !encodedPayload || !encodedSignature) {
+    throw new Error("ID token is not a compact JWS");
+  }
+  const header = JSON.parse(Buffer.from(encodedHeader, "base64url").toString("utf8")) as { alg?: string; kid?: string };
+  if (header.alg !== "RS256") {
+    throw new Error(`Unsupported ID token signing algorithm ${header.alg ?? "unknown"}`);
+  }
+  const key = jwks.keys.find((candidate) => candidate.kid === header.kid) ?? jwks.keys[0];
+  if (!key) {
+    throw new Error("OIDC JWKS does not contain a signing key");
+  }
+  const verifier = createVerify("RSA-SHA256");
+  verifier.update(`${encodedHeader}.${encodedPayload}`);
+  verifier.end();
+  const verified = verifier.verify(createPublicKey({ key, format: "jwk" }), Buffer.from(encodedSignature, "base64url"));
+  if (!verified) {
+    throw new Error("ID token signature verification failed");
+  }
+  const claims = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as OidcClaims;
+  const validation = validateIdTokenClaims(config, claims, nowEpochSeconds);
+  if (!validation.ok) {
+    throw new Error(validation.message);
+  }
+  return claims;
 }
 
 export function createCallbackState(args: { sessionId: string; tenantId: string; returnTo: string; secret: string; issuedAt?: number }): string {
@@ -270,6 +377,23 @@ export function validateCallbackState(state: string, args: { sessionId: string; 
     return deny("STATE_EXPIRED", "OIDC callback state is expired.");
   }
   return { ok: true };
+}
+
+export function decodeCallbackState(state: string): { sessionId: string; tenantId: string; returnTo: string; issuedAt: number } {
+  const [body] = state.split(".");
+  if (!body) {
+    throw new Error("OIDC callback state is malformed.");
+  }
+  const payload = JSON.parse(base64UrlDecode(body)) as { sessionId?: string; tenantId?: string; returnTo?: string; issuedAt?: number };
+  if (!payload.sessionId || !payload.tenantId || !payload.returnTo || typeof payload.issuedAt !== "number") {
+    throw new Error("OIDC callback state payload is malformed.");
+  }
+  return {
+    sessionId: payload.sessionId,
+    tenantId: payload.tenantId,
+    returnTo: payload.returnTo,
+    issuedAt: payload.issuedAt
+  };
 }
 
 export function provisionIdentityFromClaims(
@@ -390,6 +514,14 @@ function deny(code: string, message: string): AuthValidationResult {
     code,
     message
   };
+}
+
+async function readAuthJson<T>(response: Response, label: string): Promise<T> {
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`${label} failed with HTTP ${response.status}: ${text.slice(0, 500)}`);
+  }
+  return JSON.parse(text) as T;
 }
 
 function base64UrlEncode(value: string): string {

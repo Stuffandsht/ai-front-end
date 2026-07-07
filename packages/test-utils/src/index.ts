@@ -4,6 +4,7 @@ import { createLocalRuntime } from "@agent-platform/runtime";
 export function testConfig(overrides: Record<string, string | undefined> = {}): AppConfig {
   return readAppConfig({
     APP_DEPLOYMENT_MODE: "single_company",
+    APP_DATABASE_MODE: "memory",
     PUBLIC_BASE_URL: "http://localhost:3000",
     ALLOW_DEV_AUTH: "true",
     SESSION_COOKIE_NAME: "agent_platform_session",

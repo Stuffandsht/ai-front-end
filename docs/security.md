@@ -5,7 +5,7 @@ Security controls implemented in the skeleton:
 - backend policy compiler enforces provider/model/tool/retention choices.
 - tenant-scoped data model is used in both deployment modes.
 - development auth is explicit and marked unsafe for production.
-- OIDC helpers validate discovery issuer, ID token issuer/audience/time/email domain, callback state signatures, and Microsoft Entra claim mappings.
+- OIDC routes validate discovery issuer, callback state signatures, authorization-code token responses, JWKS-backed ID token signatures, issuer/audience/time/email domain claims, and Microsoft Entra claim mappings.
 - API mutation routes use backend role/permission checks through the shared authorization matrix.
 - Admin pages use backend page permission checks, and navigation hides admin links the active role cannot use.
 - provider credentials are encrypted and only referenced server-side.
@@ -19,7 +19,4 @@ Security controls implemented in the skeleton:
 
 Production hardening still needed:
 
-- live OIDC network callback/token exchange wiring.
-- external Postgres connectivity smoke test after wiring the running app to the SQL repository for `DATABASE_URL`.
-- production KMS implementation.
-- exact Docker CLI smoke test in an environment with Docker installed; equivalent Podman Compose full-stack smoke passed here.
+- exact Docker Compose CLI smoke test after installing the Docker Compose plugin; equivalent Podman Compose full-stack smoke passed here.

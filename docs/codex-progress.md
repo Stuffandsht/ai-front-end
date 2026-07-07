@@ -12,8 +12,15 @@ Completed:
 - Implemented policy compiler, retention package, local KMS/envelope encryption, provider gateway, prompt stack, MCP gateway, audit events, and chat runtime.
 - Added disabled-by-default HTTP and stdio MCP adapter boundaries.
 - Implemented SQL-backed runtime repository and SQL encryption key store.
+- Added `APP_DATABASE_MODE=postgres`, a `pg`-backed SQL executor, Postgres migration command, and web runtime selection so the live app can run against `DATABASE_URL`.
+- Expanded Postgres repository coverage for durable admin settings, including identity providers, provider credentials, retention policies, prompt versions, MCP servers, plugin installations, policy snapshots, and encrypted credential reads.
+- Made Postgres migration startup idempotent and changed SQL repository-generated IDs to include UUID entropy so persistent DBs survive app restarts without primary-key collisions.
+- Added runtime admin-state refresh so provider/model/prompt/retention/plugin changes update effective policy and registered adapters without restarting the process.
+- Wired OIDC start/callback routes with discovery, authorization-code token exchange, JWKS-backed RS256 ID-token verification, JIT user provisioning, and metadata-only login audit events.
+- Implemented OpenAI-compatible `/chat/completions` calls with server-side encrypted credential loading and redacted provider errors.
+- Implemented Vault Transit KMS wrapping/unwrapping and guarded HTTP/stdio MCP adapter execution paths behind explicit enablement gates.
 - Upgraded migration validation to execute the SQL migration in an embedded Postgres-compatible database.
-- Rendered single-company and multi-tenant Compose profiles through Podman Compose and smoke-tested the full single-company stack because Docker CLI is absent in this environment.
+- Rendered single-company and multi-tenant Compose profiles through Podman Compose and smoke-tested the full single-company stack with the Postgres-backed app runtime because the Docker Compose CLI plugin is absent in this environment.
 - Added `.dockerignore` and fully qualified container image references for non-interactive Compose/Podman compatibility.
 - Built required UI pages and deployment-mode hiding for service/tenant admin surfaces.
 - Added unit, integration, security, fast e2e, and browser e2e tests.
@@ -24,7 +31,7 @@ Validation performed:
 - command: `npm run typecheck`
   result: pass
 - command: `npm run test`
-  result: pass, including OIDC/Microsoft Entra auth helper tests, API mutation authorization regression scan, and admin page permission regression scan
+  result: pass, 35 tests including OIDC discovery/token/JWKS/ID-token verification, OpenAI-compatible provider calls, Vault Transit KMS, HTTP/stdio MCP adapters, API mutation authorization regression scan, and admin page permission regression scan
 - command: `npm run test:integration`
   result: pass, including migration execution and SQL-backed retained/ephemeral chat runtime tests
 - command: `npm run test:e2e`
@@ -39,14 +46,18 @@ Validation performed:
   result: pass
 - command: `npm run db:migrate`
   result: pass, executed migration and verified 27 required tables in embedded Postgres-compatible database
+- command: `APP_DATABASE_MODE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5432/agent_platform npm run db:migrate:postgres`
+  result: pass against Docker Postgres, applied baseline migration and verified 27 public tables
 - command: `npm run db:seed`
   result: pass when run outside sandbox; sandboxed run failed because `tsx` could not create its local IPC pipe
+- command: `APP_DATABASE_MODE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5432/agent_platform ALLOW_DEV_AUTH=true npm run db:seed`
+  result: pass against Docker Postgres; second run remained idempotent with one tenant, one provider, and two prompts
 - command: `npm run compose:check`
   result: pass
 - command: `docker compose --profile single-company config`
-  result: not run successfully because Docker CLI is not installed in this environment
+  result: not run successfully because the Docker Compose CLI plugin is not installed in this environment
 - command: `docker compose --profile multi-tenant config`
-  result: not run successfully because Docker CLI is not installed in this environment
+  result: not run successfully because the Docker Compose CLI plugin is not installed in this environment
 - command: `python3 -m pip install --user podman-compose`
   result: pass, installed a user-level Compose provider for Podman because Docker Compose is absent
 - command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company config`
@@ -61,12 +72,16 @@ Validation performed:
   result: pass, removed smoke-test containers; `podman ps -a` returned no remaining containers
 - command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company build app`
   result: pass, built the Next.js app image from `infra/docker/Dockerfile`
-- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company up -d`
-  result: pass, started app, Postgres, Valkey, and MinIO
+- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company up -d --build`
+  result: pass, built the app image, skipped an already-present baseline migration idempotently, and started app, Postgres, Valkey, and MinIO
 - command: `curl -s -f http://127.0.0.1:3000/api/config/public`
   result: pass against the Compose-launched app, returned single-company public config
 - command: Compose-launched dev login and retained `POST /api/chat`
-  result: pass, returned policy event, stream deltas, and retained message id
+  result: pass through the Postgres-backed runtime, returned policy event, stream deltas, and retained message id
+- command: raw Compose Postgres row check after retained chat
+  result: pass, found retained message/conversation/audit rows across persistent-volume restarts and no plaintext sentinel in raw message rows
+- command: Compose-launched retention policy PATCH and provider POST with API key
+  result: pass, wrote durable retention and provider rows, encrypted one provider credential, and raw Postgres search found no plaintext provider secret
 - command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company down`
   result: pass after full-stack smoke test; `podman ps -a` returned no remaining containers
 - command: `ALLOW_DEV_AUTH=true npm run dev`
@@ -95,10 +110,9 @@ Validation performed:
   result: pass, returned HTTP 403 in single-company mode because `company_admin` lacks `tenant:create`
 
 Known limitations:
-- The default development app path uses the in-memory repository; the SQL-backed runtime repository is implemented and tested through PGlite, but wiring the running app to an external Postgres `DATABASE_URL` remains production integration work.
-- Live OIDC network callback/token exchange is not wired because no external IdP credentials are available.
-- Production KMS and MCP HTTP/stdio adapters are interface stubs.
-- Docker CLI was not available in this environment, so exact `docker compose ...` validation was not performed. Equivalent Podman Compose profile rendering and full single-company stack smoke testing passed.
+- The default local npm path still uses the in-memory repository so the app can run without local services; set `APP_DATABASE_MODE=postgres` for durable runtime state.
+- No real external IdP, OpenAI-compatible provider, Vault, or MCP server credentials/endpoints are available in this environment; those live code paths are covered with mocked network/process tests.
+- Docker Engine is available, but the Docker Compose CLI plugin is not installed, so exact `docker compose ...` validation was not performed. Equivalent Podman Compose profile rendering and full single-company stack smoke testing passed.
 
 Manual verification:
 - Single-company runtime login seed creates one company tenant.
@@ -106,14 +120,18 @@ Manual verification:
 - Ephemeral mock chat does not persist sentinel content.
 - SQL-backed retained mock chat stores encrypted SQL rows and reloads through repository services.
 - SQL-backed ephemeral mock chat writes metadata-only audit/tool rows without persisted content.
+- Live Postgres-backed web runtime migrated, seeded, handled dev login, wrote retained chat rows, and avoided raw plaintext in message rows.
 - Company prompt affects mock provider response through system message names.
 - Mock tool runs; dangerous mock tool requests confirmation.
 - Audit metadata appears.
 - Raw durable snapshot search does not reveal encrypted retained messages, prompt content, provider credentials, or ephemeral sentinel content.
 - OIDC/Microsoft Entra helper tests validate discovery issuer, token audience, callback state, email domain restriction, claim mapping, and dev-auth gating.
+- OIDC route helpers are tested for discovery fetch, token exchange, JWKS fetch, and signed RS256 ID-token verification.
+- OpenAI-compatible provider tests verify server-side request construction, response parsing, tool-call parsing, usage mapping, and credential redaction.
+- Vault Transit KMS tests verify wrap/unwrap behavior through mocked Vault responses.
 - API mutation routes are regression-tested for backend `authorizedJson` permission enforcement.
 - Admin pages are regression-tested for backend page permission enforcement, and the navigation hides admin links the current role cannot use.
-- MCP HTTP/stdio adapter boundaries are tested to remain disabled by default.
+- MCP HTTP/stdio adapter tests verify both disabled-by-default gates and enabled JSON tool-list/invocation paths.
 - Final build and migration checks pass after browser e2e and MCP adapter updates.
 - Playwright browser tests verify dev login, retained chat request, single-company admin hiding, and no browser storage of chat content.
 

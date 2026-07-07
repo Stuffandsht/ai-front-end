@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ToolInvocation, ToolPermission } from "@agent-platform/db";
 import type { EffectivePolicy } from "@agent-platform/policy";
 import type { RetentionContext } from "@agent-platform/retention";
@@ -37,42 +39,161 @@ export type McpTransportAdapter = {
 
 export class HttpMcpTransportAdapter implements McpTransportAdapter {
   readonly transportType = "http" as const;
+  private readonly fetchImpl: typeof fetch;
 
-  constructor(private readonly config: { serverUrl: string; allowExternalExecution: boolean }) {}
+  constructor(private readonly config: { serverUrl: string; allowExternalExecution: boolean; fetchImpl?: typeof fetch }) {
+    this.fetchImpl = config.fetchImpl ?? fetch;
+  }
 
   async listTools(): Promise<Array<Pick<ToolDefinition, "id" | "name" | "description" | "riskLevel" | "requiresConfirmation">>> {
     if (!this.config.allowExternalExecution) {
       throw new Error("HTTP MCP transport is disabled by default until explicitly enabled by service policy");
     }
-    throw new Error(`HTTP MCP protocol client is not implemented for ${this.config.serverUrl}`);
+    const response = await this.fetchImpl(new URL("/tools", normalizedServerUrl(this.config.serverUrl)));
+    const payload = await readJsonResponse(response, "HTTP MCP tool list");
+    return normalizeToolList(payload);
   }
 
-  async invokeTool(_args: { toolId: string; args: Record<string, unknown> }): Promise<Record<string, unknown>> {
+  async invokeTool(args: { toolId: string; args: Record<string, unknown> }): Promise<Record<string, unknown>> {
     if (!this.config.allowExternalExecution) {
       throw new Error("HTTP MCP transport is disabled by default until explicitly enabled by service policy");
     }
-    throw new Error(`HTTP MCP protocol client is not implemented for ${this.config.serverUrl}`);
+    const response = await this.fetchImpl(new URL(`/tools/${encodeURIComponent(args.toolId)}/invoke`, normalizedServerUrl(this.config.serverUrl)), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ args: args.args })
+    });
+    const payload = await readJsonResponse(response, `HTTP MCP tool ${args.toolId}`);
+    return normalizeToolResult(payload);
   }
 }
 
 export class StdioMcpTransportAdapter implements McpTransportAdapter {
   readonly transportType = "stdio" as const;
 
-  constructor(private readonly config: { command: string; args: string[]; allowLocalProcessExecution: boolean }) {}
+  constructor(private readonly config: { command: string; args: string[]; allowLocalProcessExecution: boolean; timeoutMs?: number }) {}
 
   async listTools(): Promise<Array<Pick<ToolDefinition, "id" | "name" | "description" | "riskLevel" | "requiresConfirmation">>> {
     if (!this.config.allowLocalProcessExecution) {
       throw new Error("stdio MCP transport is disabled by default and will not execute local commands in MVP");
     }
-    throw new Error(`stdio MCP protocol client is not implemented for ${this.config.command}`);
+    return normalizeToolList(await this.call({ method: "tools/list" }));
   }
 
-  async invokeTool(_args: { toolId: string; args: Record<string, unknown> }): Promise<Record<string, unknown>> {
+  async invokeTool(args: { toolId: string; args: Record<string, unknown> }): Promise<Record<string, unknown>> {
     if (!this.config.allowLocalProcessExecution) {
       throw new Error("stdio MCP transport is disabled by default and will not execute local commands in MVP");
     }
-    throw new Error(`stdio MCP protocol client is not implemented for ${this.config.command}`);
+    return normalizeToolResult(
+      await this.call({
+        method: "tools/call",
+        params: {
+          name: args.toolId,
+          arguments: args.args
+        }
+      })
+    );
   }
+
+  private async call(payload: Record<string, unknown>): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const child: ChildProcessWithoutNullStreams = spawn(this.config.command, this.config.args, {
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      let stdout = "";
+      let stderr = "";
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`stdio MCP command timed out: ${this.config.command}`));
+      }, this.config.timeoutMs ?? 5000);
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      child.on("error", (error: Error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.on("close", (code: number | null) => {
+        clearTimeout(timeout);
+        if (code !== 0) {
+          reject(new Error(`stdio MCP command failed with exit ${code}: ${stderr.slice(0, 500)}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout.trim()));
+        } catch {
+          reject(new Error(`stdio MCP command returned invalid JSON: ${stdout.slice(0, 500)}`));
+        }
+      });
+      child.stdin.end(`${JSON.stringify(payload)}\n`);
+    });
+  }
+}
+
+function normalizedServerUrl(value: string): URL {
+  const url = new URL(value);
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("HTTP MCP server URL must use http or https");
+  }
+  if (!url.pathname.endsWith("/")) {
+    url.pathname = `${url.pathname}/`;
+  }
+  return url;
+}
+
+async function readJsonResponse(response: Response, label: string): Promise<unknown> {
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`${label} failed with HTTP ${response.status}: ${text.slice(0, 500)}`);
+  }
+  return text ? (JSON.parse(text) as unknown) : {};
+}
+
+function normalizeToolList(payload: unknown): Array<Pick<ToolDefinition, "id" | "name" | "description" | "riskLevel" | "requiresConfirmation">> {
+  const tools = Array.isArray(payload) ? payload : payload && typeof payload === "object" && "tools" in payload && Array.isArray(payload.tools) ? payload.tools : [];
+  return tools.flatMap((tool) => {
+    if (!tool || typeof tool !== "object") {
+      return [];
+    }
+    const record = tool as Record<string, unknown>;
+    const id = stringValue(record["id"] ?? record["name"]);
+    const name = stringValue(record["name"] ?? id);
+    if (!id || !name) {
+      return [];
+    }
+    return [
+      {
+        id,
+        name,
+        description: stringValue(record["description"]) ?? "",
+        riskLevel: riskLevel(record["riskLevel"] ?? record["risk_level"]),
+        requiresConfirmation: Boolean(record["requiresConfirmation"] ?? record["requires_confirmation"])
+      }
+    ];
+  });
+}
+
+function normalizeToolResult(payload: unknown): Record<string, unknown> {
+  if (payload && typeof payload === "object" && "result" in payload) {
+    const result = (payload as Record<string, unknown>)["result"];
+    return result && typeof result === "object" && !Array.isArray(result) ? (result as Record<string, unknown>) : { value: result };
+  }
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : { value: payload };
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function riskLevel(value: unknown): ToolDefinition["riskLevel"] {
+  return value === "medium" || value === "high" ? value : "low";
 }
 
 export type ToolExecutionRequest = {

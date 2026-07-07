@@ -13,7 +13,7 @@ export async function requirePageUser() {
 export async function requirePagePermission(permission: Permission) {
   const user = await requirePageUser();
   const runtime = await getRuntime();
-  const membership = runtime.db.getMembership(runtime.tenant.id, user.id);
+  const membership = await runtime.db.getMembership(runtime.tenant.id, user.id);
   if (!membership) {
     notFound();
   }

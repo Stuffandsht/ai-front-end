@@ -7,9 +7,10 @@ services:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile
-    command: npm run dev --workspace @agent-platform/web
+    command: sh -c "npm run db:migrate:postgres && npm run dev --workspace @agent-platform/web -- --hostname 0.0.0.0 --port 3000"
     environment:
       APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:-single_company}
+      APP_DATABASE_MODE: postgres
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
       ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-true}
       DATABASE_URL: postgresql://agent:agent@postgres:5432/agent_platform

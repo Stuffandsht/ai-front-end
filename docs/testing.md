@@ -17,11 +17,14 @@ Coverage includes:
 - policy merge rules and denial reasons.
 - retention context behavior.
 - envelope encryption/decryption.
-- provider gateway selection.
-- MCP permission checks and dangerous tool confirmation.
+- Vault Transit KMS wrapping/unwrapping through mocked Vault responses.
+- provider gateway selection and OpenAI-compatible network adapter behavior.
+- MCP permission checks, dangerous tool confirmation, and enabled HTTP/stdio adapter calls.
+- OIDC discovery, token exchange, JWKS fetch, and signed ID-token verification.
 - deployment mode seeding and single-company tenant creation rejection.
 - Postgres-compatible migration execution through PGlite.
 - SQL-backed retained and ephemeral chat runtime behavior.
+- live Postgres-backed app runtime smoke through `APP_DATABASE_MODE=postgres`.
 - retained chat encrypted persistence.
 - ephemeral sentinel non-persistence.
 - credential and prompt encryption.

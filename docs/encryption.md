@@ -8,7 +8,7 @@ Encryption is centralized in `packages/crypto`.
 - `SqlEncryptionKeyStore` persists wrapped DEK metadata to the Postgres baseline table for SQL-backed runtimes.
 - Provider credentials, prompt fragments, prompt compilations, tool payloads, and retained messages use encrypted blobs.
 
-Local development uses `LocalKmsProvider`. Production should implement the `VaultTransitKmsProvider` placeholder or another external KMS adapter.
+Local development uses `LocalKmsProvider`. SQL-backed deployments can set `KMS_PROVIDER=vault_transit` to wrap and unwrap tenant DEKs through Vault Transit.
 
 Key rotation design: create a new active tenant DEK for a purpose, mark the previous key rotated, encrypt new writes with the new key, and re-encrypt old content in controlled batches.
 

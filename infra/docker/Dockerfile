@@ -4,6 +4,8 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY apps ./apps
 COPY packages ./packages
+COPY db ./db
+COPY scripts ./scripts
 COPY tsconfig*.json ./
 
 RUN npm install

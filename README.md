@@ -14,6 +14,8 @@ npm run dev
 
 Open http://localhost:3000/chat. Development auth is available only when `ALLOW_DEV_AUTH=true`.
 
+For durable local runtime state, set `APP_DATABASE_MODE=postgres`, start Postgres, run `npm run db:migrate:postgres`, then run `npm run db:seed`.
+
 ## Validation
 
 ```bash
@@ -26,7 +28,7 @@ npm run build
 npm run compose:check
 ```
 
-Docker is not installed in this execution environment. The compose profiles were rendered with a user-level Podman Compose provider, and the single-company stack was smoke-tested that way. The same file can be launched on a host with Docker Compose:
+This environment has Docker Engine but not the Docker Compose CLI plugin. The compose profiles were rendered with a user-level Podman Compose provider, and the single-company stack was smoke-tested with the Postgres-backed app runtime. The same file can be launched on a host with Docker Compose:
 
 ```bash
 docker compose --profile dev up --build
@@ -56,7 +58,7 @@ docs                     architecture and operation docs
 ## Current Limitations
 
 - The app defaults to the in-memory repository for local no-service development; a SQL-backed runtime repository is implemented and tested through an embedded Postgres-compatible engine.
-- The SQL-backed repository is tested through an embedded Postgres-compatible engine; wiring the running app to an external Postgres `DATABASE_URL` remains production integration work.
-- OIDC/Microsoft Entra is modeled with validation helpers and documented, with development auth implemented for local use.
-- MCP HTTP/stdio adapters and production KMS are interface stubs; mock tools and local KMS are fully tested.
-- Browser e2e tests run with Playwright Chromium; this environment validated Compose through Podman because Docker CLI is absent.
+- `APP_DATABASE_MODE=postgres` runs the live app against Postgres via `DATABASE_URL`; Docker/Compose startup applies the baseline migration before Next.js starts.
+- OIDC/Microsoft Entra is wired through discovery, authorization-code token exchange, JWKS-backed ID-token verification, JIT user provisioning, and metadata-only auth audit events when `OIDC_*` settings are configured.
+- OpenAI-compatible providers, encrypted provider credentials, Vault Transit KMS, and guarded HTTP/stdio MCP adapters are implemented behind server-side configuration gates.
+- Browser e2e tests run with Playwright Chromium; this environment validated Compose through Podman because the Docker Compose CLI plugin is absent.

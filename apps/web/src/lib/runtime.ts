@@ -1,8 +1,8 @@
 import { cookies } from "next/headers";
 import { readAppConfig } from "@agent-platform/config";
-import { createLocalRuntime } from "@agent-platform/runtime";
+import { createRuntime } from "@agent-platform/runtime";
 
-type RuntimeBundle = Awaited<ReturnType<typeof createLocalRuntime>>;
+type RuntimeBundle = Awaited<ReturnType<typeof createRuntime>>;
 
 let runtimePromise: Promise<RuntimeBundle> | null = null;
 
@@ -11,7 +11,7 @@ export function getConfig() {
 }
 
 export async function getRuntime(): Promise<RuntimeBundle> {
-  runtimePromise ??= createLocalRuntime(getConfig());
+  runtimePromise ??= createRuntime(getConfig());
   return runtimePromise;
 }
 

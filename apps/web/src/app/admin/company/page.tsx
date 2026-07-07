@@ -23,7 +23,7 @@ export default async function CompanyAdminPage() {
           <div className="panel-body grid">
             <div className="field"><label>Issuer URL</label><input className="input" placeholder="https://login.microsoftonline.com/.../v2.0" /></div>
             <div className="field"><label>Client ID</label><input className="input" placeholder="Application client ID" /></div>
-            <div className="field"><label>Secret reference</label><input className="input" placeholder="secret://tenant/oidc-client-secret" /></div>
+            <div className="field"><label>Secret reference</label><input className="input" placeholder="env://OIDC_CLIENT_SECRET" /></div>
           </div>
         </section>
       </div>

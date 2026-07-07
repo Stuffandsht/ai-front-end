@@ -15,7 +15,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   const singleCompany = config.deploymentMode === "single_company";
   const user = await getCurrentUser();
   const runtime = user ? await getRuntime() : null;
-  const membership = user && runtime ? runtime.db.getMembership(runtime.tenant.id, user.id) : null;
+  const membership = user && runtime ? await runtime.db.getMembership(runtime.tenant.id, user.id) : null;
   const can = (permission: Permission) =>
     membership
       ? authorizeRole({

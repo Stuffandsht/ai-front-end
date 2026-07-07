@@ -4,7 +4,7 @@ import { getRuntime } from "@/lib/runtime";
 export async function GET() {
   return authorizedJson("audit:read", async () => {
     const runtime = await getRuntime();
-    return runtime.db.snapshot().auditEvents.map((event) => ({
+    return (await runtime.db.snapshot()).auditEvents.map((event) => ({
       id: event.id,
       type: event.type,
       requestId: event.requestId ?? null,

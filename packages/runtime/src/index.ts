@@ -1,7 +1,17 @@
 import type { AppConfig } from "@agent-platform/config";
-import { createLocalContentCrypto } from "@agent-platform/crypto";
-import { InMemoryDatabase, type Conversation, type PromptFragment, type Tenant, type TenantMembership, type User } from "@agent-platform/db";
-import { createMockTools, McpGateway, type ToolExecutionResult } from "@agent-platform/mcp-gateway";
+import { createLocalContentCrypto, EnvelopeContentCrypto, LocalKmsProvider, VaultTransitKmsProvider, type KmsProvider } from "@agent-platform/crypto";
+import {
+  InMemoryDatabase,
+  PgSqlExecutor,
+  SqlEncryptionKeyStore,
+  SqlRuntimeDatabase,
+  type Conversation,
+  type PromptFragment,
+  type Tenant,
+  type TenantMembership,
+  type User
+} from "@agent-platform/db";
+import { createMockTools, HttpMcpTransportAdapter, McpGateway, type ToolDefinition, type ToolExecutionResult } from "@agent-platform/mcp-gateway";
 import {
   compileEffectivePolicy,
   summarizePolicy,
@@ -11,7 +21,7 @@ import {
   type ProviderInventory
 } from "@agent-platform/policy";
 import { compilePromptStack, loadPromptFragmentSources, renderCompiledPrompt, type CompiledPrompt } from "@agent-platform/prompts";
-import { MockProvider, ProviderGateway, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from "@agent-platform/providers";
+import { MockProvider, OpenAICompatibleProvider, ProviderGateway, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from "@agent-platform/providers";
 import { buildRetentionContext, type RetentionMode } from "@agent-platform/retention";
 
 type MaybePromise<T> = T | Promise<T>;
@@ -74,6 +84,13 @@ export type RuntimeServices<TDb extends RuntimeDatabase = RuntimeDatabase> = {
   policyDocuments: PolicyDocuments;
 };
 
+export type RuntimeBundle<TDb extends RuntimeDatabase = RuntimeDatabase> = RuntimeServices<TDb> & {
+  runtime: ChatRuntime;
+  devUser: User;
+  tenant: Tenant;
+  refreshAdminState(): Promise<void>;
+};
+
 export type RuntimeDatabase = {
   findTenantBySlugOrHost(slugOrHost: string | undefined): MaybePromise<Tenant | null>;
   getMembership(tenantId: string, userId: string): MaybePromise<TenantMembership | null>;
@@ -85,6 +102,63 @@ export type RuntimeDatabase = {
   getPromptFragments(ids: string[]): MaybePromise<PromptFragment[]>;
   readPromptFragmentContent(fragment: PromptFragment): Promise<string>;
   listConversations(tenantId: string, userId: string): MaybePromise<Conversation[]>;
+};
+
+type AdminStateDatabase = (InMemoryDatabase | SqlRuntimeDatabase) & {
+  snapshot(): MaybePromise<{
+    providerConfigs: Array<{
+      id: string;
+      tenantId: string;
+      scopeType: "service" | "tenant" | "user";
+      scopeId: string;
+      providerType: string;
+      baseUrl: string | null;
+      authMode: string;
+      credentialRef: string | null;
+      enabled: boolean;
+      deletedAt: Date | null;
+    }>;
+    modelConfigs: Array<{
+      providerConfigId: string;
+      modelKey: string;
+      enabled: boolean;
+      deletedAt: Date | null;
+    }>;
+    promptFragments: Array<{
+      id: string;
+      tenantId: string;
+      scopeType: string;
+      scopeId: string;
+      priority: number;
+      enabled: boolean;
+      deletedAt: Date | null;
+    }>;
+    retentionPolicies: Array<{
+      tenantId: string;
+      subjectType: "tenant" | "group" | "user";
+      subjectId: string;
+      defaultRetentionMode: RetentionMode;
+      mandatoryRetentionMode: RetentionMode | null;
+      deletedAt: Date | null;
+    }>;
+    mcpServers: Array<{
+      id: string;
+      name: string;
+      description: string;
+      transportType: "mock" | "http" | "stdio";
+      serverUrl: string | null;
+      riskLevel: "low" | "medium" | "high";
+      enabled: boolean;
+    }>;
+    pluginInstallations: Array<{
+      scopeType: "service" | "tenant" | "user";
+      scopeId: string;
+      mcpServerId: string;
+      enabled: boolean;
+      deletedAt: Date | null;
+    }>;
+  }>;
+  getProviderCredentialSecret(input: { tenantId: string; providerConfigId: string; userId?: string | null; credentialRef?: string | null }): MaybePromise<string | null>;
 };
 
 export class ChatRuntime {
@@ -365,7 +439,7 @@ export class ChatRuntime {
   }
 }
 
-export async function createLocalRuntime(config: AppConfig): Promise<RuntimeServices<InMemoryDatabase> & { runtime: ChatRuntime; devUser: User; tenant: Tenant }> {
+export async function createLocalRuntime(config: AppConfig): Promise<RuntimeBundle<InMemoryDatabase>> {
   const localCrypto = createLocalContentCrypto(config.kms.localMasterKeyBase64);
   const db = new InMemoryDatabase(localCrypto.crypto, () => localCrypto.keyStore.snapshot());
   const tenant = await db.seedForConfig(config);
@@ -378,6 +452,7 @@ export async function createLocalRuntime(config: AppConfig): Promise<RuntimeServ
     userId: devUser.id,
     role: config.deploymentMode === "single_company" && config.devAuth.role === "service_admin" ? "company_admin" : config.devAuth.role
   });
+  await ensureConfiguredIdentityProvider(db, config, tenant);
 
   const mockProvider = await db.createProviderConfig({
     tenantId: tenant.id,
@@ -424,7 +499,7 @@ export async function createLocalRuntime(config: AppConfig): Promise<RuntimeServ
     enabled: true
   });
 
-  const companyPrompt = await db.createPromptFragment({
+  await db.createPromptFragment({
     tenantId: tenant.id,
     scopeType: "tenant",
     scopeId: tenant.id,
@@ -433,7 +508,7 @@ export async function createLocalRuntime(config: AppConfig): Promise<RuntimeServ
     priority: 100,
     createdBy: devUser.id
   });
-  const userPrompt = await db.createPromptFragment({
+  await db.createPromptFragment({
     tenantId: tenant.id,
     scopeType: "user",
     scopeId: devUser.id,
@@ -443,13 +518,6 @@ export async function createLocalRuntime(config: AppConfig): Promise<RuntimeServ
     createdBy: devUser.id
   });
 
-  const providers = new ProviderGateway();
-  providers.register(new MockProvider());
-
-  const mcp = new McpGateway(db);
-  for (const tool of createMockTools()) {
-    mcp.registerTool(tool);
-  }
   await db.createToolPermission({
     tenantId: tenant.id,
     toolId: "mock.read_context",
@@ -467,82 +535,411 @@ export async function createLocalRuntime(config: AppConfig): Promise<RuntimeServ
     requiresConfirmation: true
   });
 
-  const inventory: ProviderInventory = {
-    providers: [
-      {
-        id: "mock",
-        modelIds: ["mock-chat", "mock-chat-fast"],
-        enabled: true
-      },
-      {
-        id: "user-openai",
-        modelIds: ["gpt-compatible"],
-        enabled: true,
-        byo: true
-      }
-    ],
-    toolIds: ["mock.read_context", "mock.dangerous_action"]
-  };
+  return createRuntimeBundle(config, db, tenant, devUser);
+}
 
-  const policyDocuments: PolicyDocuments = {
-    platform: {
-      allowedProviderIds: ["mock", "user-openai"],
-      defaultProviderId: "mock",
-      allowedModelIds: ["mock-chat", "mock-chat-fast", "gpt-compatible"],
-      defaultModelId: "mock-chat",
-      allowedToolIds: ["mock.read_context", "mock.dangerous_action"],
-      enabledToolIds: ["mock.read_context"],
-      defaultRetentionMode: "retained",
-      userByoProviderAllowed: true
-    },
-    ...(config.deploymentMode === "multi_tenant"
-      ? {
-          service: {
-            allowedProviderIds: ["mock", "user-openai"],
-            defaultProviderId: "mock",
-            defaultModelId: "mock-chat"
-          }
-        }
-      : {}),
-    tenant: {
-      allowedProviderIds: ["mock"],
-      defaultProviderId: config.singleCompany.defaultProviderId,
-      allowedModelIds: ["mock-chat", "mock-chat-fast"],
-      defaultModelId: config.singleCompany.defaultModelId,
-      allowedToolIds: ["mock.read_context", "mock.dangerous_action"],
-      enabledToolIds: ["mock.read_context"],
-      promptFragments: [
-        {
-          id: companyPrompt.id,
-          priority: companyPrompt.priority
-        }
-      ],
-      userByoProviderAllowed: config.singleCompany.allowUserByoProvider,
-      defaultRetentionMode: config.singleCompany.defaultRetention
-    },
-    user: {
-      promptFragments: [
-        {
-          id: userPrompt.id,
-          priority: userPrompt.priority
-        }
-      ]
-    }
-  };
+export async function createRuntime(config: AppConfig): Promise<RuntimeBundle<InMemoryDatabase> | RuntimeBundle<SqlRuntimeDatabase>> {
+  return config.databaseMode === "postgres" ? createPostgresRuntime(config) : createLocalRuntime(config);
+}
 
-  const services: RuntimeServices<InMemoryDatabase> = {
+export async function createPostgresRuntime(config: AppConfig): Promise<RuntimeBundle<SqlRuntimeDatabase>> {
+  const sql = new PgSqlExecutor(config.databaseUrl);
+  const keyStore = new SqlEncryptionKeyStore(sql);
+  const crypto = new EnvelopeContentCrypto(createKmsProvider(config), keyStore);
+  const db = new SqlRuntimeDatabase(sql, crypto);
+  const tenant = await db.seedForConfig(config);
+  const devUser = await db.upsertUser({
+    email: config.devAuth.email,
+    displayName: config.devAuth.displayName
+  });
+  await db.upsertMembership({
+    tenantId: tenant.id,
+    userId: devUser.id,
+    role: config.deploymentMode === "single_company" && config.devAuth.role === "service_admin" ? "company_admin" : config.devAuth.role
+  });
+  await ensureConfiguredIdentityProvider(db, config, tenant);
+
+  const mockProvider = await db.createProviderConfig({
+    tenantId: tenant.id,
+    scopeType: config.deploymentMode === "single_company" ? "tenant" : "service",
+    scopeId: config.deploymentMode === "single_company" ? tenant.id : "service-default",
+    providerType: "mock",
+    displayName: "Mock Provider",
+    baseUrl: null,
+    authMode: "none",
+    credentialRef: null,
+    retentionPolicyClass: "standard",
+    supportsStreaming: true,
+    supportsToolCalling: true,
+    supportsJsonSchema: true,
+    supportsEmbeddings: false,
+    enabled: true
+  });
+  await db.createModelConfig({
+    tenantId: tenant.id,
+    providerConfigId: mockProvider.id,
+    modelKey: "mock-chat",
+    displayName: "Mock Chat",
+    contextWindow: 8192,
+    maxOutputTokens: 1024,
+    supportsTools: true,
+    supportsStreaming: true,
+    supportsJsonSchema: true,
+    inputModalitiesJson: ["text"],
+    outputModalitiesJson: ["text"],
+    enabled: true
+  });
+  await db.createModelConfig({
+    tenantId: tenant.id,
+    providerConfigId: mockProvider.id,
+    modelKey: "mock-chat-fast",
+    displayName: "Mock Chat Fast",
+    contextWindow: 4096,
+    maxOutputTokens: 512,
+    supportsTools: true,
+    supportsStreaming: true,
+    supportsJsonSchema: false,
+    inputModalitiesJson: ["text"],
+    outputModalitiesJson: ["text"],
+    enabled: true
+  });
+
+  await ensureSqlPromptFragment(db, {
+    tenantId: tenant.id,
+    scopeType: "tenant",
+    scopeId: tenant.id,
+    name: config.deploymentMode === "single_company" ? "Company Prompt" : "Tenant Prompt",
+    content: "Answer as the governed internal AI assistant. Enforce policy outside the model.",
+    priority: 100,
+    createdBy: devUser.id
+  });
+  await ensureSqlPromptFragment(db, {
+    tenantId: tenant.id,
+    scopeType: "user",
+    scopeId: devUser.id,
+    name: "User Preference",
+    content: "Prefer concise, actionable responses.",
+    priority: 20,
+    createdBy: devUser.id
+  });
+
+  await ensureSqlToolPermission(db, {
+    tenantId: tenant.id,
+    toolId: "mock.read_context",
+    subjectType: "tenant",
+    subjectId: tenant.id,
+    permission: "use",
+    requiresConfirmation: false
+  });
+  await ensureSqlToolPermission(db, {
+    tenantId: tenant.id,
+    toolId: "mock.dangerous_action",
+    subjectType: "tenant",
+    subjectId: tenant.id,
+    permission: "use",
+    requiresConfirmation: true
+  });
+
+  return createRuntimeBundle(config, db, tenant, devUser);
+}
+
+async function ensureConfiguredIdentityProvider(db: InMemoryDatabase | SqlRuntimeDatabase, config: AppConfig, tenant: Tenant): Promise<void> {
+  if (!config.oidc) {
+    return;
+  }
+  const existing = (await db.snapshot()).identityProviders.find(
+    (provider) =>
+      provider.tenantId === tenant.id &&
+      provider.issuerUrl === config.oidc?.issuerUrl &&
+      provider.clientId === config.oidc?.clientId &&
+      provider.deletedAt == null
+  );
+  if (existing) {
+    await db.updateIdentityProvider(existing.id, {
+      clientSecretRef: config.oidc.clientSecretRef,
+      allowedEmailDomains: config.oidc.allowedEmailDomains,
+      claimMappingJson: config.oidc.claimMappingJson,
+      enabled: config.oidc.enabled
+    });
+    return;
+  }
+  await db.createIdentityProvider({
+    tenantId: tenant.id,
+    providerType: config.oidc.providerType,
+    issuerUrl: config.oidc.issuerUrl,
+    clientId: config.oidc.clientId,
+    clientSecretRef: config.oidc.clientSecretRef,
+    allowedEmailDomains: config.oidc.allowedEmailDomains,
+    claimMappingJson: config.oidc.claimMappingJson,
+    enabled: config.oidc.enabled
+  });
+}
+
+async function createRuntimeBundle<TDb extends InMemoryDatabase | SqlRuntimeDatabase>(
+  config: AppConfig,
+  db: TDb,
+  tenant: Tenant,
+  devUser: User
+): Promise<RuntimeBundle<TDb>> {
+  const services: RuntimeServices<TDb> = {
     config,
     db,
-    providers,
-    mcp,
-    inventory,
-    policyDocuments
+    providers: new ProviderGateway(),
+    mcp: new McpGateway(db),
+    inventory: { providers: [], toolIds: [] },
+    policyDocuments: {}
   };
   const runtime = new ChatRuntime(services);
-  return {
+  const bundle: RuntimeBundle<TDb> = {
     ...services,
     runtime,
     devUser,
-    tenant
+    tenant,
+    refreshAdminState: async () => {
+      const adminState = await buildAdminState(config, db, tenant);
+      services.providers = adminState.providers;
+      services.mcp = adminState.mcp;
+      services.inventory = adminState.inventory;
+      services.policyDocuments = adminState.policyDocuments;
+      bundle.providers = adminState.providers;
+      bundle.mcp = adminState.mcp;
+      bundle.inventory = adminState.inventory;
+      bundle.policyDocuments = adminState.policyDocuments;
+    }
   };
+  await bundle.refreshAdminState();
+  return bundle;
+}
+
+async function buildAdminState(config: AppConfig, db: AdminStateDatabase, tenant: Tenant): Promise<Pick<RuntimeServices, "providers" | "mcp" | "inventory" | "policyDocuments">> {
+  const snapshot = await db.snapshot();
+  const providers = new ProviderGateway();
+  const mcp = new McpGateway(db);
+  const mockTools = createMockTools();
+  for (const tool of mockTools) {
+    mcp.registerTool(tool);
+  }
+  const externalTools = await registerExternalMcpTools(mcp, snapshot.mcpServers, snapshot.pluginInstallations, tenant.id);
+  const toolIds = unique([...mockTools.map((tool) => tool.id), ...externalTools.map((tool) => tool.id)]);
+
+  const activeProviderConfigs = snapshot.providerConfigs.filter(
+    (provider) =>
+      provider.enabled &&
+      provider.deletedAt == null &&
+      provider.tenantId === tenant.id &&
+      (provider.scopeType === "service" || provider.scopeId === tenant.id || provider.scopeType === "user")
+  );
+  const activeModels = snapshot.modelConfigs.filter((model) => model.enabled && model.deletedAt == null);
+  const inventoryProviders = new Map<string, { id: string; modelIds: string[]; enabled: boolean; byo?: boolean }>();
+
+  let mockRegistered = false;
+  for (const providerConfig of activeProviderConfigs) {
+    const providerId = providerRuntimeId(providerConfig);
+    const modelIds = activeModels.filter((model) => model.providerConfigId === providerConfig.id).map((model) => model.modelKey);
+    if (modelIds.length === 0) {
+      continue;
+    }
+
+    if (providerConfig.providerType === "mock") {
+      if (!mockRegistered) {
+        providers.register(new MockProvider());
+        mockRegistered = true;
+      }
+    } else if (providerConfig.providerType === "openai_compatible") {
+      if (providerConfig.authMode === "user_key") {
+        continue;
+      }
+      const secret =
+        providerConfig.authMode === "none"
+          ? ""
+          : await db.getProviderCredentialSecret({
+              tenantId: providerConfig.tenantId,
+              providerConfigId: providerConfig.id,
+              credentialRef: providerConfig.credentialRef
+            });
+      if (!providerConfig.baseUrl || (providerConfig.authMode !== "none" && !secret)) {
+        continue;
+      }
+      providers.register(new OpenAICompatibleProvider({ id: providerId, baseUrl: providerConfig.baseUrl, apiKey: secret ?? "" }));
+    } else {
+      continue;
+    }
+
+    const current = inventoryProviders.get(providerId);
+    const nextModelIds = unique([...(current?.modelIds ?? []), ...modelIds]);
+    const nextProvider = {
+      id: providerId,
+      modelIds: nextModelIds,
+      enabled: true,
+      ...(providerConfig.scopeType === "user" ? { byo: true } : {})
+    };
+    inventoryProviders.set(providerId, nextProvider);
+  }
+
+  const providerInventory = [...inventoryProviders.values()];
+  const providerIds = providerInventory.map((provider) => provider.id);
+  const modelIds = unique(providerInventory.flatMap((provider) => provider.modelIds));
+  const tenantPrompts = snapshot.promptFragments
+    .filter((fragment) => fragment.tenantId === tenant.id && fragment.scopeType === "tenant" && fragment.scopeId === tenant.id && fragment.enabled && fragment.deletedAt == null)
+    .map((fragment) => ({ id: fragment.id, priority: fragment.priority }));
+  const userPrompts = snapshot.promptFragments
+    .filter((fragment) => fragment.tenantId === tenant.id && fragment.scopeType === "user" && fragment.enabled && fragment.deletedAt == null)
+    .map((fragment) => ({ id: fragment.id, priority: fragment.priority }));
+  const retentionPolicy = snapshot.retentionPolicies.find(
+    (policy) => policy.tenantId === tenant.id && policy.subjectType === "tenant" && policy.subjectId === tenant.id && policy.deletedAt == null
+  );
+  const defaultRetentionMode = retentionPolicy?.defaultRetentionMode ?? config.singleCompany.defaultRetention;
+  const defaultProviderId = chooseDefault(config.singleCompany.defaultProviderId, providerIds) ?? chooseDefault(config.defaultProviderId, providerIds) ?? "mock";
+  const defaultModelId = chooseDefault(config.singleCompany.defaultModelId, modelIds) ?? chooseDefault(config.defaultModelId, modelIds) ?? "mock-chat";
+  const enabledToolIds = toolIds.filter((toolId) => toolId !== "mock.dangerous_action");
+
+  return {
+    providers,
+    mcp,
+    inventory: {
+      providers: providerInventory,
+      toolIds
+    },
+    policyDocuments: {
+      platform: {
+        allowedProviderIds: providerIds,
+        defaultProviderId: chooseDefault(config.defaultProviderId, providerIds) ?? defaultProviderId,
+        allowedModelIds: modelIds,
+        defaultModelId: chooseDefault(config.defaultModelId, modelIds) ?? defaultModelId,
+        allowedToolIds: toolIds,
+        enabledToolIds,
+        defaultRetentionMode: "retained",
+        userByoProviderAllowed: true
+      },
+      ...(config.deploymentMode === "multi_tenant"
+        ? {
+            service: {
+              allowedProviderIds: providerIds,
+              defaultProviderId,
+              allowedModelIds: modelIds,
+              defaultModelId,
+              allowedToolIds: toolIds,
+              enabledToolIds
+            }
+          }
+        : {}),
+      tenant: {
+        allowedProviderIds: providerIds,
+        defaultProviderId,
+        allowedModelIds: modelIds,
+        defaultModelId,
+        allowedToolIds: toolIds,
+        enabledToolIds,
+        promptFragments: tenantPrompts,
+        userByoProviderAllowed: config.singleCompany.allowUserByoProvider,
+        defaultRetentionMode,
+        ...(retentionPolicy?.mandatoryRetentionMode ? { mandatoryRetentionMode: retentionPolicy.mandatoryRetentionMode } : {})
+      },
+      user: {
+        promptFragments: userPrompts
+      }
+    }
+  };
+}
+
+async function registerExternalMcpTools(
+  mcp: McpGateway,
+  servers: Awaited<ReturnType<AdminStateDatabase["snapshot"]>>["mcpServers"],
+  installations: Awaited<ReturnType<AdminStateDatabase["snapshot"]>>["pluginInstallations"],
+  tenantId: string
+): Promise<Array<Pick<ToolDefinition, "id">>> {
+  const enabledInstallations = installations.filter(
+    (installation) =>
+      installation.enabled &&
+      installation.deletedAt == null &&
+      ((installation.scopeType === "tenant" && installation.scopeId === tenantId) || installation.scopeType === "service")
+  );
+  const serverById = new Map(servers.filter((server) => server.enabled).map((server) => [server.id, server]));
+  const registered: Array<Pick<ToolDefinition, "id">> = [];
+
+  for (const installation of enabledInstallations) {
+    const server = serverById.get(installation.mcpServerId);
+    if (!server || server.transportType !== "http" || !server.serverUrl) {
+      continue;
+    }
+    const adapter = new HttpMcpTransportAdapter({
+      serverUrl: server.serverUrl,
+      allowExternalExecution: true
+    });
+    try {
+      const tools = await adapter.listTools();
+      for (const tool of tools) {
+        const definition: ToolDefinition = {
+          id: tool.id,
+          name: tool.name,
+          description: tool.description,
+          riskLevel: tool.riskLevel,
+          requiresConfirmation: tool.requiresConfirmation,
+          execute: (args) => adapter.invokeTool({ toolId: tool.id, args })
+        };
+        mcp.registerTool(definition);
+        registered.push({ id: tool.id });
+      }
+    } catch {
+      continue;
+    }
+  }
+  return registered;
+}
+
+function providerRuntimeId(provider: { id: string; providerType: string }): string {
+  return provider.providerType === "mock" ? "mock" : provider.id;
+}
+
+function chooseDefault<T extends string>(candidate: T, values: T[]): T | null {
+  return values.includes(candidate) ? candidate : values[0] ?? null;
+}
+
+function unique<T>(values: T[]): T[] {
+  return [...new Set(values)];
+}
+
+function createKmsProvider(config: AppConfig): KmsProvider {
+  if (config.kms.provider === "vault_transit") {
+    if (!config.kms.vaultAddr || !config.kms.vaultTransitKey) {
+      throw new Error("KMS_PROVIDER=vault_transit requires VAULT_ADDR and VAULT_TRANSIT_KEY");
+    }
+    return new VaultTransitKmsProvider({
+      vaultAddr: config.kms.vaultAddr,
+      transitKey: config.kms.vaultTransitKey,
+      ...(config.kms.vaultToken ? { vaultToken: config.kms.vaultToken } : {})
+    });
+  }
+  return new LocalKmsProvider(config.kms.localMasterKeyBase64);
+}
+
+async function ensureSqlPromptFragment(
+  db: SqlRuntimeDatabase,
+  input: Parameters<SqlRuntimeDatabase["createPromptFragment"]>[0]
+): Promise<PromptFragment> {
+  const existing = (await db.snapshot()).promptFragments.find(
+    (fragment) =>
+      fragment.tenantId === input.tenantId &&
+      fragment.scopeType === input.scopeType &&
+      fragment.scopeId === input.scopeId &&
+      fragment.name === input.name &&
+      fragment.deletedAt == null
+  );
+  return existing ?? db.createPromptFragment(input);
+}
+
+async function ensureSqlToolPermission(
+  db: SqlRuntimeDatabase,
+  input: Parameters<SqlRuntimeDatabase["createToolPermission"]>[0]
+): Promise<void> {
+  const existing = (await db.listToolPermissions(input.tenantId)).find(
+    (permission) =>
+      permission.toolId === input.toolId &&
+      permission.subjectType === input.subjectType &&
+      permission.subjectId === input.subjectId &&
+      permission.permission === input.permission
+  );
+  if (!existing) {
+    await db.createToolPermission(input);
+  }
 }

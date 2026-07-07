@@ -17,7 +17,7 @@ export async function GET() {
       runtime.policyDocuments,
       runtime.inventory
     );
-    const fragments = runtime.db.getPromptFragments(policy.promptFragmentIds);
+    const fragments = await runtime.db.getPromptFragments(policy.promptFragmentIds);
     const sources = await loadPromptFragmentSources(fragments, (fragment) => runtime.db.readPromptFragmentContent(fragment));
     const prompt = compilePromptStack(sources);
     return {

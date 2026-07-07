@@ -5,7 +5,7 @@ export default async function ChatPage() {
   const runtime = await getRuntime();
   const user = (await getCurrentUser()) ?? (await requirePageUser());
   const conversations = user ? await runtime.runtime.getConversations(user) : [];
-  const snapshot = runtime.db.snapshot();
+  const snapshot = await runtime.db.snapshot();
   const providers = snapshot.providerConfigs.filter((provider) => provider.enabled);
   const models = snapshot.modelConfigs.filter((model) => model.enabled);
   const audit = snapshot.auditEvents.slice(-4).reverse();

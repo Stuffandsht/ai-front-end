@@ -4,7 +4,7 @@ import { getRuntime } from "@/lib/runtime";
 export default async function ProvidersPage() {
   await requirePagePermission("provider:configure_tenant");
   const runtime = await getRuntime();
-  const snapshot = runtime.db.snapshot();
+  const snapshot = await runtime.db.snapshot();
   return (
     <>
       <div className="topline">
