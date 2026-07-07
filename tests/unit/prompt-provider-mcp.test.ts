@@ -227,6 +227,80 @@ describe("provider gateway", () => {
     ).rejects.toThrow("[redacted]");
   });
 
+  it("sends assistant tool-call history back to OpenRouter-compatible providers", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const provider = new OpenRouterProvider({
+      apiKey: "or-secret",
+      fetchImpl: async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(
+          JSON.stringify({
+            id: "gen_2",
+            model: "openai/gpt-4o",
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  content: "final"
+                }
+              }
+            ],
+            usage: {
+              prompt_tokens: 5,
+              completion_tokens: 1
+            }
+          })
+        );
+      }
+    });
+
+    await provider.completeChat({
+      requestId: "req_openrouter_history",
+      tenantId: "tenant_1",
+      userId: "user_1",
+      providerId: "openrouter",
+      modelId: "openai/gpt-4o",
+      messages: [
+        { role: "user", content: "use a tool" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call_1",
+              toolId: "mock.read_context",
+              args: { query: "docs" }
+            }
+          ]
+        },
+        {
+          role: "tool",
+          toolCallId: "call_1",
+          content: "{\"context\":\"docs\"}"
+        }
+      ],
+      tools: [{ id: "mock.read_context", description: "Read context" }],
+      retention: buildRetentionContext("retained")
+    });
+
+    const messages = requests[0]?.["messages"] as Array<Record<string, unknown>>;
+    expect(messages[1]?.["tool_calls"]).toEqual([
+      {
+        id: "call_1",
+        type: "function",
+        function: {
+          name: "mock.read_context",
+          arguments: "{\"query\":\"docs\"}"
+        }
+      }
+    ]);
+    expect(messages[2]).toMatchObject({
+      role: "tool",
+      tool_call_id: "call_1",
+      content: "{\"context\":\"docs\"}"
+    });
+  });
+
   it("lists OpenRouter models and parses streaming chat chunks", async () => {
     const provider = new OpenRouterProvider({
       apiKey: "or-secret",

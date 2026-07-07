@@ -14,6 +14,7 @@ import type {
   Message,
   MessagePart,
   ModelConfig,
+  PlatformPluginInstallation,
   PluginInstallation,
   PromptCompilation,
   PromptFragment,
@@ -1073,6 +1074,62 @@ export class SqlRuntimeDatabase {
     return result.rows[0] ? pluginInstallationFromRow(result.rows[0]) : null;
   }
 
+  async createPlatformPluginInstallation(
+    input: Omit<PlatformPluginInstallation, "id" | "createdAt" | "updatedAt" | "deletedAt" | "configCiphertext"> & { config?: string | null }
+  ): Promise<PlatformPluginInstallation> {
+    const configCiphertext =
+      input.config && input.config.length > 0
+        ? await this.contentCrypto.encryptForTenant({
+            tenantId: input.tenantId,
+            plaintext: input.config,
+            purpose: "secret",
+            aad: platformPluginInstallationAad(input.pluginId, input.scopeId)
+          })
+        : null;
+    const result = await this.sql.query<PlatformPluginInstallationRow>(
+      `insert into platform_plugin_installations (
+        id, tenant_id, scope_type, scope_id, plugin_id, manifest_json,
+        content_ciphertext, content_nonce, content_tag, content_key_id,
+        content_hash, enabled, installed_by, approved_by, retention_mode
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      returning *`,
+      [
+        this.nextId("platform_plugin_installation"),
+        input.tenantId,
+        input.scopeType,
+        input.scopeId,
+        input.pluginId,
+        input.manifestJson,
+        configCiphertext?.contentCiphertext ?? null,
+        configCiphertext?.contentNonce ?? null,
+        configCiphertext?.contentTag ?? null,
+        configCiphertext?.contentKeyId ?? null,
+        configCiphertext?.contentHash ?? null,
+        input.enabled,
+        input.installedBy,
+        input.approvedBy,
+        "retained"
+      ]
+    );
+    return platformPluginInstallationFromRow(requiredRow(result.rows[0], "created platform plugin installation"));
+  }
+
+  async updatePlatformPluginInstallation(id: string, input: { enabled?: boolean; approvedBy?: string | null }): Promise<PlatformPluginInstallation | null> {
+    const existing = await this.sql.query<PlatformPluginInstallationRow>("select * from platform_plugin_installations where id = $1 and deleted_at is null limit 1", [id]);
+    if (!existing.rows[0]) {
+      return null;
+    }
+    const current = platformPluginInstallationFromRow(existing.rows[0]);
+    const result = await this.sql.query<PlatformPluginInstallationRow>(
+      `update platform_plugin_installations
+       set enabled = $2, approved_by = $3, updated_at = now()
+       where id = $1 and deleted_at is null
+       returning *`,
+      [id, input.enabled ?? current.enabled, input.approvedBy ?? current.approvedBy]
+    );
+    return result.rows[0] ? platformPluginInstallationFromRow(result.rows[0]) : null;
+  }
+
   async createToolInvocation(input: {
     tenantId: string;
     userId: string;
@@ -1234,6 +1291,7 @@ export class SqlRuntimeDatabase {
       attachments,
       mcpServers,
       pluginInstallations,
+      platformPluginInstallations,
       toolPermissions,
       toolInvocations,
       auditEvents,
@@ -1259,6 +1317,7 @@ export class SqlRuntimeDatabase {
       this.sql.query<AttachmentRow>("select * from attachments order by created_at asc"),
       this.sql.query<McpServerRow>("select * from mcp_servers order by created_at asc"),
       this.sql.query<PluginInstallationRow>("select * from plugin_installations order by created_at asc"),
+      this.sql.query<PlatformPluginInstallationRow>("select * from platform_plugin_installations order by created_at asc"),
       this.sql.query<ToolPermissionRow>("select * from tool_permissions order by created_at asc"),
       this.sql.query<ToolInvocationRow>("select * from tool_invocations order by created_at asc"),
       this.sql.query<AuditEventRow>("select * from audit_events order by created_at asc"),
@@ -1286,6 +1345,7 @@ export class SqlRuntimeDatabase {
       attachments: attachments.rows.map(attachmentFromRow),
       mcpServers: mcpServers.rows.map(mcpServerFromRow),
       pluginInstallations: pluginInstallations.rows.map(pluginInstallationFromRow),
+      platformPluginInstallations: platformPluginInstallations.rows.map(platformPluginInstallationFromRow),
       toolPermissions: toolPermissions.rows.map(toolPermissionFromRow),
       toolInvocations: toolInvocations.rows.map(toolInvocationFromRow),
       auditEvents: auditEvents.rows.map(auditEventFromRow),
@@ -1315,6 +1375,7 @@ export class SqlRuntimeDatabase {
       "attachments",
       "mcp_servers",
       "plugin_installations",
+      "platform_plugin_installations",
       "tool_permissions",
       "tool_invocations",
       "audit_events",
@@ -1690,6 +1751,24 @@ function pluginInstallationFromRow(row: PluginInstallationRow): PluginInstallati
   };
 }
 
+function platformPluginInstallationFromRow(row: PlatformPluginInstallationRow): PlatformPluginInstallation {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    scopeType: row.scope_type,
+    scopeId: row.scope_id,
+    pluginId: row.plugin_id,
+    manifestJson: jsonRecord(row.manifest_json) as PlatformPluginInstallation["manifestJson"],
+    configCiphertext: encryptedBlobFromNullableRow(row),
+    enabled: row.enabled,
+    installedBy: row.installed_by,
+    approvedBy: row.approved_by,
+    createdAt: date(row.created_at),
+    updatedAt: date(row.updated_at),
+    deletedAt: nullableDate(row.deleted_at)
+  };
+}
+
 function messageFromRow(row: MessageRow): Message {
   return {
     id: row.id,
@@ -1857,6 +1936,14 @@ function pluginInstallationAad(mcpServerId: string, scopeId: string): Record<str
   return {
     record_type: "plugin_installation",
     mcp_server_id: mcpServerId,
+    scope_id: scopeId
+  };
+}
+
+function platformPluginInstallationAad(pluginId: string, scopeId: string): Record<string, string> {
+  return {
+    record_type: "platform_plugin_installation",
+    plugin_id: pluginId,
     scope_id: scopeId
   };
 }
@@ -2171,6 +2258,21 @@ type PluginInstallationRow = NullableEncryptedContentRow & {
   scope_type: PluginInstallation["scopeType"];
   scope_id: string;
   mcp_server_id: string;
+  enabled: boolean;
+  installed_by: string;
+  approved_by: string | null;
+  created_at: unknown;
+  updated_at: unknown;
+  deleted_at: unknown;
+};
+
+type PlatformPluginInstallationRow = NullableEncryptedContentRow & {
+  id: string;
+  tenant_id: string;
+  scope_type: PlatformPluginInstallation["scopeType"];
+  scope_id: string;
+  plugin_id: string;
+  manifest_json: unknown;
   enabled: boolean;
   installed_by: string;
   approved_by: string | null;

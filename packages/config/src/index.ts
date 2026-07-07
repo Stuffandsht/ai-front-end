@@ -11,6 +11,7 @@ export type AppConfig = {
   sessionCookieName: string;
   defaultProviderId: string;
   defaultModelId: string;
+  maxToolIterations: number;
   databaseUrl: string;
   redisUrl: string;
   s3: {
@@ -62,6 +63,14 @@ function readBool(value: string | undefined, fallback: boolean): boolean {
     return fallback;
   }
   return value.toLowerCase() === "true" || value === "1" || value.toLowerCase() === "yes";
+}
+
+function readPositiveInt(value: string | undefined, fallback: number): number {
+  if (value == null || value === "") {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function readDeploymentMode(value: string | undefined): DeploymentMode {
@@ -145,6 +154,7 @@ export function readAppConfig(env: Env = process.env): AppConfig {
     sessionCookieName: required(env["SESSION_COOKIE_NAME"], "SESSION_COOKIE_NAME", "agent_platform_session"),
     defaultProviderId,
     defaultModelId,
+    maxToolIterations: readPositiveInt(env["AGENT_MAX_TOOL_ITERATIONS"], 4),
     databaseUrl: required(env["DATABASE_URL"], "DATABASE_URL", "postgresql://agent:agent@localhost:5432/agent_platform"),
     redisUrl: required(env["REDIS_URL"], "REDIS_URL", "redis://localhost:6379"),
     s3: {

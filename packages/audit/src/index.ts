@@ -8,8 +8,10 @@ export type AuditEventType =
   | "provider.denied"
   | "prompt.compiled"
   | "chat.completed"
+  | "agent.limit_reached"
   | "tool.invoked"
   | "tool.denied"
+  | "tool.confirmation_required"
   | "retention.selected"
   | "admin.changed";
 

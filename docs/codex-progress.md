@@ -28,6 +28,9 @@ Completed:
 - Added required documentation files.
 - Audited and checked the first-pass acceptance checklist in `codex_goal_ai_agent_chat_platform.md` against implementation and validation evidence.
 - Implemented first-class OpenRouter provider support with attribution headers, retention-aware routing preferences, SSE streaming parsing, OpenAI-style tool-call compatibility, model catalog sync, encrypted tenant credential use, admin UI actions, and provider/model policy inventory registration.
+- Implemented the first multi-step agent/tool runtime loop with provider tool-call capture, MCP execution, tool-result feedback messages, confirmation/denial stops, and `AGENT_MAX_TOOL_ITERATIONS` enforcement.
+- Expanded MCP plugin management with tenant-installed HTTP/stdio server records, encrypted install config, env secret refs, tenant tool permissions, admin UI controls, and chat/admin tool-call timelines.
+- Added manifest-based platform plugins outside MCP for prompt packs, provider presets, policy bundles, and workflow actions without arbitrary code execution; tenant policy bundles now feed into effective policy.
 
 Validation performed:
 - command: `npm install`
@@ -35,9 +38,9 @@ Validation performed:
 - command: `npm run typecheck`
   result: pass
 - command: `npm run test`
-  result: pass, 37 tests including OIDC discovery/token/JWKS/ID-token verification, OpenAI-compatible and OpenRouter provider calls, Vault Transit KMS, HTTP/stdio MCP adapters, API mutation authorization regression scan, and admin page permission regression scan
+  result: pass, 38 tests including OIDC discovery/token/JWKS/ID-token verification, OpenAI-compatible and OpenRouter provider calls, assistant tool-call history, Vault Transit KMS, HTTP/stdio MCP adapters, API mutation authorization regression scan, and admin page permission regression scan
 - command: `npm run test:integration`
-  result: pass, 11 tests including migration execution, SQL-backed retained/ephemeral chat runtime tests, and OpenRouter policy inventory registration with encrypted credentials
+  result: pass, 16 tests including migration execution, SQL-backed retained/ephemeral chat runtime tests, multi-step tool loop behavior, tenant-installed stdio MCP registration, platform policy bundles, OpenRouter policy inventory registration, and encrypted plugin config checks
 - command: `npm run test:e2e`
   result: pass with Playwright Chromium browser tests when run with host-level local bind permission
 - command: `npm run test:e2e:headless`
@@ -49,9 +52,9 @@ Validation performed:
 - command: `npm run build`
   result: pass
 - command: `npm run db:migrate`
-  result: pass, executed migration and verified 27 required tables in embedded Postgres-compatible database
+  result: pass, executed migration and verified 28 required tables in embedded Postgres-compatible database
 - command: `APP_DATABASE_MODE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5432/agent_platform npm run db:migrate:postgres`
-  result: pass against Docker Postgres, applied baseline migration and verified 27 public tables
+  result: pass against Docker Postgres, applied baseline/additive migration and verified 28 public tables
 - command: `npm run db:seed`
   result: pass when run outside sandbox; sandboxed run failed because `tsx` could not create its local IPC pipe
 - command: `APP_DATABASE_MODE=postgres DATABASE_URL=postgresql://agent:agent@localhost:5432/agent_platform ALLOW_DEV_AUTH=true npm run db:seed`
@@ -71,7 +74,7 @@ Validation performed:
 - command: `curl -s -f http://127.0.0.1:3000/api/config/public`
   result: pass against the Compose-launched app, returned single-company public config
 - command: Compose-launched dev login and retained `POST /api/chat`
-  result: pass through the Postgres-backed runtime, returned policy event, stream deltas, and retained message id
+  result: pass through the Postgres-backed runtime, returned policy event, stream deltas, tool-call requested/completed events, second provider iteration, and retained message id
 - command: Compose-launched `POST /api/providers` with `providerType=openrouter`
   result: pass, created an OpenRouter tenant provider with encrypted credential storage
 - command: raw Compose Postgres row check after retained chat

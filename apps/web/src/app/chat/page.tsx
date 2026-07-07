@@ -9,6 +9,8 @@ export default async function ChatPage() {
   const providers = snapshot.providerConfigs.filter((provider) => provider.enabled);
   const models = snapshot.modelConfigs.filter((model) => model.enabled);
   const audit = snapshot.auditEvents.slice(-4).reverse();
+  const tools = runtime.mcp.listTools();
+  const toolTimeline = snapshot.toolInvocations.filter((invocation) => invocation.tenantId === runtime.tenant.id).slice(-6).reverse();
 
   return (
     <>
@@ -70,6 +72,20 @@ export default async function ChatPage() {
                 </select>
               </div>
               <div className="subtle">Ephemeral mode avoids local content retention; configured providers and tools may still process the request.</div>
+              <div className="toolbar">
+                {tools.map((tool) => (
+                  <label key={tool.id}>
+                    <input type="checkbox" name="enabledToolIds" value={tool.id} defaultChecked={tool.id === "mock.read_context"} /> {tool.name}
+                  </label>
+                ))}
+              </div>
+              <div className="toolbar">
+                {tools.filter((tool) => tool.requiresConfirmation).map((tool) => (
+                  <label key={tool.id}>
+                    <input type="checkbox" name="confirmedToolIds" value={tool.id} /> Confirm {tool.name}
+                  </label>
+                ))}
+              </div>
               <textarea className="textarea" name="message" defaultValue="Use tool context for this request." aria-label="Message" />
               <button className="button" type="submit">Send</button>
             </form>
@@ -82,10 +98,21 @@ export default async function ChatPage() {
             <span className="badge">policy gated</span>
           </div>
           <div className="panel-body timeline">
-            {runtime.mcp.listTools().map((tool) => (
+            {tools.map((tool) => (
               <div className="timeline-item" key={tool.id}>
                 <strong>{tool.name}</strong>
                 <div className="subtle">{tool.riskLevel}{tool.requiresConfirmation ? " confirmation required" : ""}</div>
+              </div>
+            ))}
+          </div>
+          <div className="panel-header">
+            <h2 className="panel-title">Tool timeline</h2>
+          </div>
+          <div className="panel-body timeline">
+            {toolTimeline.length === 0 ? <div className="subtle">No tool calls yet</div> : toolTimeline.map((item) => (
+              <div className="timeline-item" key={item.id}>
+                <strong>{item.toolId}</strong>
+                <div className="subtle">{item.status} · {item.retentionMode}</div>
               </div>
             ))}
           </div>

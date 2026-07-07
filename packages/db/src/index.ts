@@ -217,6 +217,67 @@ export type PluginInstallation = TimestampedTenantRecord & {
   approvedBy: string | null;
 };
 
+export type PlatformPluginKind = "prompt_pack" | "provider_preset" | "policy_bundle" | "workflow_action";
+
+export type PlatformPluginManifest = {
+  id: string;
+  name: string;
+  version: string;
+  kind: PlatformPluginKind;
+  description?: string;
+  promptPack?: {
+    prompts?: Array<{
+      name: string;
+      contentRef?: string;
+      priority?: number;
+    }>;
+  };
+  providerPreset?: {
+    providerType?: ProviderConfig["providerType"];
+    baseUrl?: string;
+    models?: Array<{
+      modelKey: string;
+      displayName?: string;
+      contextWindow?: number;
+      maxOutputTokens?: number;
+      supportsTools?: boolean;
+    }>;
+  };
+  policyBundle?: {
+    allowedProviderIds?: string[];
+    deniedProviderIds?: string[];
+    defaultProviderId?: string;
+    allowedModelIds?: string[];
+    deniedModelIds?: string[];
+    defaultModelId?: string;
+    allowedToolIds?: string[];
+    deniedToolIds?: string[];
+    enabledToolIds?: string[];
+    defaultRetentionMode?: RetentionMode;
+    mandatoryRetentionMode?: RetentionMode;
+    tracePolicy?: "full" | "redacted" | "metadata_only" | "none";
+  };
+  workflowActions?: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    promptRef?: string;
+    toolIds?: string[];
+  }>;
+};
+
+export type PlatformPluginInstallation = TimestampedTenantRecord & {
+  id: string;
+  scopeType: "tenant" | "user";
+  scopeId: string;
+  pluginId: string;
+  manifestJson: PlatformPluginManifest;
+  configCiphertext: EncryptedBlob | null;
+  enabled: boolean;
+  installedBy: string;
+  approvedBy: string | null;
+};
+
 export type ToolPermission = TimestampedTenantRecord & {
   id: string;
   toolId: string;
@@ -268,6 +329,7 @@ export type DatabaseSnapshot = {
   attachments: Attachment[];
   mcpServers: McpServer[];
   pluginInstallations: PluginInstallation[];
+  platformPluginInstallations: PlatformPluginInstallation[];
   toolPermissions: ToolPermission[];
   toolInvocations: ToolInvocation[];
   auditEvents: AuditEvent[];
@@ -303,6 +365,7 @@ export class InMemoryDatabase {
       attachments: [],
       mcpServers: [],
       pluginInstallations: [],
+      platformPluginInstallations: [],
       toolPermissions: [],
       toolInvocations: [],
       auditEvents: [],
@@ -1103,6 +1166,49 @@ export class InMemoryDatabase {
 
   async updatePluginInstallation(id: string, input: { enabled?: boolean; approvedBy?: string | null }): Promise<PluginInstallation | null> {
     const installation = this.snapshotData.pluginInstallations.find((item) => item.id === id && item.deletedAt == null);
+    if (!installation) {
+      return null;
+    }
+    installation.enabled = input.enabled ?? installation.enabled;
+    installation.approvedBy = input.approvedBy ?? installation.approvedBy;
+    installation.updatedAt = new Date();
+    return installation;
+  }
+
+  async createPlatformPluginInstallation(
+    input: Omit<PlatformPluginInstallation, keyof TimestampedTenantRecord | "id" | "configCiphertext"> & { tenantId: string; config?: string | null }
+  ): Promise<PlatformPluginInstallation> {
+    const configCiphertext =
+      input.config && input.config.length > 0
+        ? await this.contentCrypto.encryptForTenant({
+            tenantId: input.tenantId,
+            plaintext: input.config,
+            purpose: "secret",
+            aad: {
+              record_type: "platform_plugin_installation",
+              plugin_id: input.pluginId,
+              scope_id: input.scopeId
+            }
+          })
+        : null;
+    const installation: PlatformPluginInstallation = {
+      ...tenantRecord(input.tenantId),
+      id: this.nextId("platform_plugin_installation"),
+      scopeType: input.scopeType,
+      scopeId: input.scopeId,
+      pluginId: input.pluginId,
+      manifestJson: structuredClone(input.manifestJson),
+      configCiphertext,
+      enabled: input.enabled,
+      installedBy: input.installedBy,
+      approvedBy: input.approvedBy
+    };
+    this.snapshotData.platformPluginInstallations.push(installation);
+    return installation;
+  }
+
+  async updatePlatformPluginInstallation(id: string, input: { enabled?: boolean; approvedBy?: string | null }): Promise<PlatformPluginInstallation | null> {
+    const installation = this.snapshotData.platformPluginInstallations.find((item) => item.id === id && item.deletedAt == null);
     if (!installation) {
       return null;
     }

@@ -27,6 +27,7 @@ const requiredTables = [
   "attachments",
   "mcp_servers",
   "plugin_installations",
+  "platform_plugin_installations",
   "tool_permissions",
   "tool_invocations",
   "audit_events",

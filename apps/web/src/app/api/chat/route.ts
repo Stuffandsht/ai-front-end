@@ -9,10 +9,10 @@ export async function POST(request: Request) {
     const runtime = await getRuntime();
     const user = await requireCurrentUser();
     const contentType = request.headers.get("content-type") ?? "";
-    const body = contentType.includes("application/json") ? await request.json() as Record<string, unknown> : Object.fromEntries((await request.formData()).entries());
+    const body = contentType.includes("application/json") ? await request.json() as Record<string, unknown> : await formBody(request);
     const chatRequest: ChatRequest = {
       message: String(body["message"] ?? ""),
-      enabledToolIds: body["enabledToolIds"] ? String(body["enabledToolIds"]).split(",").filter(Boolean) : ["mock.read_context"]
+      enabledToolIds: stringList(body["enabledToolIds"], ["mock.read_context"])
     };
     const requestedProviderId = optionalString(body["requestedProviderId"]);
     const requestedModelId = optionalString(body["requestedModelId"]);
@@ -25,6 +25,10 @@ export async function POST(request: Request) {
     }
     if (requestedRetentionMode) {
       chatRequest.requestedRetentionMode = requestedRetentionMode as RetentionMode;
+    }
+    const confirmedToolIds = stringList(body["confirmedToolIds"], []);
+    if (confirmedToolIds.length > 0) {
+      chatRequest.confirmedToolIds = confirmedToolIds;
     }
     const result = await runtime.runtime.runChat(user, chatRequest);
     return {
@@ -42,4 +46,29 @@ export async function GET() {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+async function formBody(request: Request): Promise<Record<string, unknown>> {
+  const formData = await request.formData();
+  const body = Object.fromEntries(formData.entries()) as Record<string, unknown>;
+  const enabledToolIds = formData.getAll("enabledToolIds").flatMap((value) => (typeof value === "string" ? [value] : []));
+  const confirmedToolIds = formData.getAll("confirmedToolIds").flatMap((value) => (typeof value === "string" ? [value] : []));
+  if (enabledToolIds.length > 0) {
+    body["enabledToolIds"] = enabledToolIds;
+  }
+  if (confirmedToolIds.length > 0) {
+    body["confirmedToolIds"] = confirmedToolIds;
+  }
+  return body;
+}
+
+function stringList(value: unknown, fallback: string[]): string[] {
+  if (Array.isArray(value)) {
+    const values = value.flatMap((item) => (typeof item === "string" && item.length > 0 ? [item] : []));
+    return values.length > 0 ? values : fallback;
+  }
+  if (typeof value === "string" && value.length > 0) {
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  return fallback;
 }

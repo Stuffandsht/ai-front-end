@@ -50,6 +50,34 @@ describe("sql-backed chat runtime", () => {
     expect(toolInvocations.rows.every((row) => row.args_ciphertext_nullable == null && row.result_ciphertext_nullable == null)).toBe(true);
     expect(auditEvents.rows.some((row) => row.audit_content_mode === "metadata_only" && row.content_json == null)).toBe(true);
   });
+
+  it("encrypts platform plugin install config in SQL raw storage", async () => {
+    const services = await createSqlRuntimeServices();
+    const secret = uniqueSentinel("SQL_PLATFORM_PLUGIN_SECRET");
+    await services.repo.createPlatformPluginInstallation({
+      tenantId: services.tenant.id,
+      scopeType: "tenant",
+      scopeId: services.tenant.id,
+      pluginId: "sql-policy-bundle",
+      manifestJson: {
+        id: "sql-policy-bundle",
+        name: "SQL Policy Bundle",
+        version: "0.1.0",
+        kind: "policy_bundle",
+        policyBundle: {
+          enabledToolIds: ["mock.read_context"]
+        }
+      },
+      enabled: true,
+      installedBy: services.user.id,
+      approvedBy: services.user.id,
+      config: secret
+    });
+
+    expect(await services.repo.rawSearch(secret)).toBe(false);
+    const raw = await services.sql.query("select * from platform_plugin_installations");
+    expect(JSON.stringify(raw.rows)).not.toContain(secret);
+  });
 });
 
 async function createSqlRuntimeServices() {

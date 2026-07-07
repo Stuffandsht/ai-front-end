@@ -6,18 +6,20 @@ import {
   SqlEncryptionKeyStore,
   SqlRuntimeDatabase,
   type Conversation,
+  type PlatformPluginInstallation,
   type PromptFragment,
   type Tenant,
   type TenantMembership,
   type User
 } from "@agent-platform/db";
-import { createMockTools, HttpMcpTransportAdapter, McpGateway, type ToolDefinition, type ToolExecutionResult } from "@agent-platform/mcp-gateway";
+import { createMockTools, HttpMcpTransportAdapter, McpGateway, StdioMcpTransportAdapter, type ToolDefinition, type ToolExecutionResult } from "@agent-platform/mcp-gateway";
 import {
   compileEffectivePolicy,
   summarizePolicy,
   type EffectivePolicy,
   type PolicyDocuments,
   type PolicyInput,
+  type PolicyScopeConfig,
   type ProviderInventory
 } from "@agent-platform/policy";
 import { compilePromptStack, loadPromptFragmentSources, renderCompiledPrompt, type CompiledPrompt } from "@agent-platform/prompts";
@@ -44,12 +46,16 @@ export type SafeToolCallSummary = {
   toolId: string;
   argsPreview: Record<string, unknown>;
   requiresConfirmation: boolean;
+  iteration: number;
 };
 
 export type SafeToolResultSummary = {
+  toolCallId: string;
   toolId: string;
   status: ToolExecutionResult["status"];
   metadata: Record<string, unknown>;
+  resultPreview?: Record<string, unknown>;
+  iteration: number;
 };
 
 export type SafeError = {
@@ -59,7 +65,7 @@ export type SafeError = {
 
 export type ChatStreamEvent =
   | { type: "policy"; policySummary: SafePolicySummary }
-  | { type: "message_delta"; delta: string }
+  | { type: "message_delta"; delta: string; iteration: number }
   | { type: "tool_call_requested"; toolCall: SafeToolCallSummary }
   | { type: "tool_call_completed"; toolResult: SafeToolResultSummary }
   | { type: "message_done"; messageId?: string }
@@ -147,7 +153,11 @@ type AdminStateDatabase = (InMemoryDatabase | SqlRuntimeDatabase) & {
       description: string;
       transportType: "mock" | "http" | "stdio";
       serverUrl: string | null;
+      command: string | null;
+      argsJson: string[];
+      envSecretRefsJson: string[];
       riskLevel: "low" | "medium" | "high";
+      retentionPolicyClass: "standard" | "metadata_only_required";
       enabled: boolean;
     }>;
     pluginInstallations: Array<{
@@ -157,6 +167,7 @@ type AdminStateDatabase = (InMemoryDatabase | SqlRuntimeDatabase) & {
       enabled: boolean;
       deletedAt: Date | null;
     }>;
+    platformPluginInstallations: PlatformPluginInstallation[];
   }>;
   getProviderCredentialSecret(input: { tenantId: string; providerConfigId: string; userId?: string | null; credentialRef?: string | null }): MaybePromise<string | null>;
 };
@@ -258,80 +269,154 @@ export class ChatRuntime {
       }
     ];
     let finalResult: ChatCompletionResult | null = null;
-    const pendingToolCalls: ToolCallRequest[] = [];
+    let totalToolCallCount = 0;
 
-    try {
-      for await (const event of this.services.providers.streamChat(policy, {
-        requestId,
-        tenantId: tenant.id,
-        userId: user.id,
-        messages,
-        tools: enabledTools,
-        retention
-      })) {
-        if (event.type === "delta") {
-          events.push({
-            type: "message_delta",
-            delta: event.delta
-          });
+    for (let iteration = 0; iteration <= this.services.config.maxToolIterations; iteration += 1) {
+      let roundResult: ChatCompletionResult | null = null;
+      const roundToolCalls: ToolCallRequest[] = [];
+
+      try {
+        for await (const event of this.services.providers.streamChat(policy, {
+          requestId,
+          tenantId: tenant.id,
+          userId: user.id,
+          messages,
+          tools: enabledTools,
+          retention
+        })) {
+          if (event.type === "delta") {
+            events.push({
+              type: "message_delta",
+              delta: event.delta,
+              iteration
+            });
+          }
+          if (event.type === "tool_call") {
+            roundToolCalls.push(event.toolCall);
+          }
+          if (event.type === "done") {
+            roundResult = event.result;
+          }
         }
-        if (event.type === "tool_call") {
-          pendingToolCalls.push(event.toolCall);
-        }
-        if (event.type === "done") {
-          finalResult = event.result;
+      } catch (error) {
+        events.push({
+          type: "error",
+          error: {
+            code: "PROVIDER_ERROR",
+            message: error instanceof Error ? error.message : "Provider error"
+          }
+        });
+        break;
+      }
+
+      if (!roundResult) {
+        break;
+      }
+      finalResult = roundResult;
+
+      const toolCalls = roundToolCalls.length > 0 ? roundToolCalls : roundResult.toolCalls;
+      if (toolCalls.length === 0) {
+        break;
+      }
+
+      if (iteration >= this.services.config.maxToolIterations) {
+        events.push({
+          type: "error",
+          error: {
+            code: "TOOL_ITERATION_LIMIT",
+            message: `Stopped after ${this.services.config.maxToolIterations} tool execution rounds.`
+          }
+        });
+        await this.services.db.createAudit({
+          tenantId: tenant.id,
+          userId: user.id,
+          type: "agent.limit_reached",
+          requestId,
+          metadata: {
+            maxToolIterations: this.services.config.maxToolIterations,
+            pendingToolCount: toolCalls.length
+          },
+          retention
+        });
+        break;
+      }
+
+      const completedToolResults: Array<{ toolCall: ToolCallRequest; result: Record<string, unknown> }> = [];
+      let stopAfterTools = false;
+
+      for (const toolCall of toolCalls) {
+        const confirmed = request.confirmedToolIds?.includes(toolCall.toolId) ?? false;
+        const registeredTool = this.services.mcp.listTools().find((tool) => tool.id === toolCall.toolId);
+        events.push({
+          type: "tool_call_requested",
+          toolCall: {
+            id: toolCall.id,
+            toolId: toolCall.toolId,
+            argsPreview: retention.canStoreToolPayloads ? toolCall.args : { redacted: true },
+            requiresConfirmation: Boolean(registeredTool?.requiresConfirmation && !confirmed),
+            iteration
+          }
+        });
+        const toolResult = await this.services.mcp.executeTool({
+          tenantId: tenant.id,
+          userId: user.id,
+          conversationId,
+          requestId,
+          toolId: toolCall.toolId,
+          args: toolCall.args,
+          confirmed,
+          policy,
+          retention
+        });
+        totalToolCallCount += 1;
+        await this.services.db.createAudit({
+          tenantId: tenant.id,
+          userId: user.id,
+          type: auditTypeForToolResult(toolResult.status),
+          requestId,
+          metadata: {
+            toolCallId: toolCall.id,
+            toolId: toolCall.toolId,
+            status: toolResult.status,
+            iteration
+          },
+          retention
+        });
+        events.push({
+          type: "tool_call_completed",
+          toolResult: {
+            toolCallId: toolCall.id,
+            toolId: toolCall.toolId,
+            status: toolResult.status,
+            metadata: toolResult.status === "completed" ? { resultKeys: Object.keys(toolResult.result) } : { reason: toolResult.reason },
+            ...(toolResult.status === "completed" ? { resultPreview: retention.canStoreToolPayloads ? toolResult.result : { redacted: true } } : {}),
+            iteration
+          }
+        });
+
+        if (toolResult.status === "completed") {
+          completedToolResults.push({ toolCall, result: toolResult.result });
+        } else {
+          stopAfterTools = true;
         }
       }
-    } catch (error) {
-      events.push({
-        type: "error",
-        error: {
-          code: "PROVIDER_ERROR",
-          message: error instanceof Error ? error.message : "Provider error"
-        }
-      });
-    }
 
-    for (const toolCall of pendingToolCalls) {
-      events.push({
-        type: "tool_call_requested",
-        toolCall: {
-          id: toolCall.id,
-          toolId: toolCall.toolId,
-          argsPreview: retention.canStoreToolPayloads ? toolCall.args : { redacted: true },
-          requiresConfirmation: !request.confirmedToolIds?.includes(toolCall.toolId)
-        }
+      if (stopAfterTools) {
+        break;
+      }
+
+      messages.push({
+        role: "assistant",
+        content: roundResult.content,
+        toolCalls
       });
-      const toolResult = await this.services.mcp.executeTool({
-        tenantId: tenant.id,
-        userId: user.id,
-        conversationId,
-        requestId,
-        toolId: toolCall.toolId,
-        args: toolCall.args,
-        confirmed: request.confirmedToolIds?.includes(toolCall.toolId) ?? false,
-        policy,
-        retention
-      });
-      await this.services.db.createAudit({
-        tenantId: tenant.id,
-        userId: user.id,
-        type: toolResult.status === "completed" ? "tool.invoked" : "tool.denied",
-        requestId,
-        metadata: {
-          toolId: toolCall.toolId,
-          status: toolResult.status
-        },
-        retention
-      });
-      events.push({
-        type: "tool_call_completed",
-        toolResult: {
-          toolId: toolCall.toolId,
-          status: toolResult.status,
-          metadata: toolResult.status === "completed" ? { resultKeys: Object.keys(toolResult.result) } : { reason: toolResult.reason }
-        }
-      });
+      for (const completed of completedToolResults) {
+        messages.push({
+          role: "tool",
+          toolCallId: completed.toolCall.id,
+          content: JSON.stringify(completed.result)
+        });
+      }
     }
 
     let assistantMessageId: string | undefined;
@@ -356,7 +441,7 @@ export class ChatRuntime {
         providerId: policy.selectedProviderId,
         modelId: policy.selectedModelId,
         tokenCounts: finalResult?.usage ?? null,
-        toolCount: pendingToolCalls.length,
+        toolCount: totalToolCallCount,
         retentionMode: policy.retentionMode
       },
       retention
@@ -800,10 +885,19 @@ async function buildAdminState(config: AppConfig, db: AdminStateDatabase, tenant
   const retentionPolicy = snapshot.retentionPolicies.find(
     (policy) => policy.tenantId === tenant.id && policy.subjectType === "tenant" && policy.subjectId === tenant.id && policy.deletedAt == null
   );
+  const platformPluginPolicy = platformPluginPolicyBundle(snapshot.platformPluginInstallations, tenant.id);
   const defaultRetentionMode = retentionPolicy?.defaultRetentionMode ?? config.singleCompany.defaultRetention;
   const defaultProviderId = chooseDefault(config.singleCompany.defaultProviderId, providerIds) ?? chooseDefault(config.defaultProviderId, providerIds) ?? "mock";
   const defaultModelId = chooseDefault(config.singleCompany.defaultModelId, modelIds) ?? chooseDefault(config.defaultModelId, modelIds) ?? "mock-chat";
-  const enabledToolIds = toolIds.filter((toolId) => toolId !== "mock.dangerous_action");
+  const enabledToolIds = unique([...(platformPluginPolicy.enabledToolIds ?? []), ...toolIds.filter((toolId) => toolId !== "mock.dangerous_action")]).filter((toolId) =>
+    toolIds.includes(toolId)
+  );
+  const tenantAllowedToolIds = platformPluginPolicy.allowedToolIds ? platformPluginPolicy.allowedToolIds.filter((toolId) => toolIds.includes(toolId)) : toolIds;
+  const tenantAllowedProviderIds = platformPluginPolicy.allowedProviderIds
+    ? platformPluginPolicy.allowedProviderIds.filter((providerId) => providerIds.includes(providerId))
+    : providerIds;
+  const tenantAllowedModelIds = platformPluginPolicy.allowedModelIds ? platformPluginPolicy.allowedModelIds.filter((modelId) => modelIds.includes(modelId)) : modelIds;
+  const tenantMandatoryRetentionMode = platformPluginPolicy.mandatoryRetentionMode ?? retentionPolicy?.mandatoryRetentionMode ?? null;
 
   return {
     providers,
@@ -836,22 +930,67 @@ async function buildAdminState(config: AppConfig, db: AdminStateDatabase, tenant
           }
         : {}),
       tenant: {
-        allowedProviderIds: providerIds,
-        defaultProviderId,
-        allowedModelIds: modelIds,
-        defaultModelId,
-        allowedToolIds: toolIds,
+        allowedProviderIds: tenantAllowedProviderIds,
+        defaultProviderId: chooseDefault(platformPluginPolicy.defaultProviderId ?? defaultProviderId, tenantAllowedProviderIds) ?? defaultProviderId,
+        allowedModelIds: tenantAllowedModelIds,
+        defaultModelId: chooseDefault(platformPluginPolicy.defaultModelId ?? defaultModelId, tenantAllowedModelIds) ?? defaultModelId,
+        allowedToolIds: tenantAllowedToolIds,
+        ...(platformPluginPolicy.deniedProviderIds ? { deniedProviderIds: platformPluginPolicy.deniedProviderIds } : {}),
+        ...(platformPluginPolicy.deniedModelIds ? { deniedModelIds: platformPluginPolicy.deniedModelIds } : {}),
+        ...(platformPluginPolicy.deniedToolIds ? { deniedToolIds: platformPluginPolicy.deniedToolIds } : {}),
         enabledToolIds,
         promptFragments: tenantPrompts,
         userByoProviderAllowed: config.singleCompany.allowUserByoProvider,
-        defaultRetentionMode,
-        ...(retentionPolicy?.mandatoryRetentionMode ? { mandatoryRetentionMode: retentionPolicy.mandatoryRetentionMode } : {})
+        defaultRetentionMode: platformPluginPolicy.defaultRetentionMode ?? defaultRetentionMode,
+        ...(platformPluginPolicy.tracePolicy ? { tracePolicy: platformPluginPolicy.tracePolicy } : {}),
+        ...(tenantMandatoryRetentionMode ? { mandatoryRetentionMode: tenantMandatoryRetentionMode } : {})
       },
       user: {
         promptFragments: userPrompts
       }
     }
   };
+}
+
+function platformPluginPolicyBundle(installations: PlatformPluginInstallation[], tenantId: string): PolicyScopeConfig {
+  const output: PolicyScopeConfig = {};
+  for (const installation of installations) {
+    if (!installation.enabled || installation.deletedAt != null || installation.scopeType !== "tenant" || installation.scopeId !== tenantId) {
+      continue;
+    }
+    const manifest = installation.manifestJson;
+    if (manifest.kind !== "policy_bundle" || !manifest.policyBundle) {
+      continue;
+    }
+    const bundle = manifest.policyBundle;
+    const allowedProviderIds = mergePolicyList(output.allowedProviderIds, bundle.allowedProviderIds);
+    const deniedProviderIds = mergePolicyList(output.deniedProviderIds, bundle.deniedProviderIds);
+    const allowedModelIds = mergePolicyList(output.allowedModelIds, bundle.allowedModelIds);
+    const deniedModelIds = mergePolicyList(output.deniedModelIds, bundle.deniedModelIds);
+    const allowedToolIds = mergePolicyList(output.allowedToolIds, bundle.allowedToolIds);
+    const deniedToolIds = mergePolicyList(output.deniedToolIds, bundle.deniedToolIds);
+    const enabledToolIds = mergePolicyList(output.enabledToolIds, bundle.enabledToolIds);
+    if (allowedProviderIds) output.allowedProviderIds = allowedProviderIds;
+    if (deniedProviderIds) output.deniedProviderIds = deniedProviderIds;
+    if (allowedModelIds) output.allowedModelIds = allowedModelIds;
+    if (deniedModelIds) output.deniedModelIds = deniedModelIds;
+    if (allowedToolIds) output.allowedToolIds = allowedToolIds;
+    if (deniedToolIds) output.deniedToolIds = deniedToolIds;
+    if (enabledToolIds) output.enabledToolIds = enabledToolIds;
+    if (bundle.defaultProviderId) output.defaultProviderId = bundle.defaultProviderId;
+    if (bundle.defaultModelId) output.defaultModelId = bundle.defaultModelId;
+    if (bundle.defaultRetentionMode) output.defaultRetentionMode = bundle.defaultRetentionMode;
+    if (bundle.mandatoryRetentionMode) output.mandatoryRetentionMode = bundle.mandatoryRetentionMode;
+    if (bundle.tracePolicy) output.tracePolicy = bundle.tracePolicy;
+  }
+  return output;
+}
+
+function mergePolicyList(left: string[] | undefined, right: string[] | undefined): string[] | undefined {
+  if (!right || right.length === 0) {
+    return left;
+  }
+  return unique([...(left ?? []), ...right]);
 }
 
 async function registerExternalMcpTools(
@@ -871,13 +1010,25 @@ async function registerExternalMcpTools(
 
   for (const installation of enabledInstallations) {
     const server = serverById.get(installation.mcpServerId);
-    if (!server || server.transportType !== "http" || !server.serverUrl) {
+    if (!server) {
       continue;
     }
-    const adapter = new HttpMcpTransportAdapter({
-      serverUrl: server.serverUrl,
-      allowExternalExecution: true
-    });
+    const adapter =
+      server.transportType === "http" && server.serverUrl
+        ? new HttpMcpTransportAdapter({
+            serverUrl: server.serverUrl,
+            allowExternalExecution: true
+          })
+        : server.transportType === "stdio" && server.command
+          ? new StdioMcpTransportAdapter({
+              command: server.command,
+              args: server.argsJson,
+              allowLocalProcessExecution: true
+            })
+          : null;
+    if (!adapter) {
+      continue;
+    }
     try {
       const tools = await adapter.listTools();
       for (const tool of tools) {
@@ -885,8 +1036,8 @@ async function registerExternalMcpTools(
           id: tool.id,
           name: tool.name,
           description: tool.description,
-          riskLevel: tool.riskLevel,
-          requiresConfirmation: tool.requiresConfirmation,
+          riskLevel: highestRiskLevel(server.riskLevel, tool.riskLevel),
+          requiresConfirmation: tool.requiresConfirmation || server.riskLevel === "high",
           execute: (args) => adapter.invokeTool({ toolId: tool.id, args })
         };
         mcp.registerTool(definition);
@@ -897,6 +1048,25 @@ async function registerExternalMcpTools(
     }
   }
   return registered;
+}
+
+function highestRiskLevel(left: ToolDefinition["riskLevel"], right: ToolDefinition["riskLevel"]): ToolDefinition["riskLevel"] {
+  const ranks: Record<ToolDefinition["riskLevel"], number> = {
+    low: 0,
+    medium: 1,
+    high: 2
+  };
+  return ranks[left] >= ranks[right] ? left : right;
+}
+
+function auditTypeForToolResult(status: ToolExecutionResult["status"]): "tool.invoked" | "tool.denied" | "tool.confirmation_required" {
+  if (status === "completed") {
+    return "tool.invoked";
+  }
+  if (status === "requires_confirmation") {
+    return "tool.confirmation_required";
+  }
+  return "tool.denied";
 }
 
 function providerRuntimeId(provider: { id: string; providerType: string }): string {

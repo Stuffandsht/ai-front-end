@@ -315,6 +315,27 @@ CREATE TABLE plugin_installations (
   deleted_at timestamptz
 );
 
+CREATE TABLE platform_plugin_installations (
+  id text PRIMARY KEY,
+  tenant_id text NOT NULL REFERENCES tenants(id),
+  scope_type text NOT NULL,
+  scope_id text NOT NULL,
+  plugin_id text NOT NULL,
+  manifest_json jsonb NOT NULL,
+  content_ciphertext text,
+  content_nonce text,
+  content_tag text,
+  content_key_id text,
+  content_hash text,
+  enabled boolean NOT NULL DEFAULT true,
+  installed_by text NOT NULL REFERENCES users(id),
+  approved_by text REFERENCES users(id),
+  retention_mode text NOT NULL DEFAULT 'retained',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  deleted_at timestamptz
+);
+
 CREATE TABLE tool_permissions (
   id text PRIMARY KEY,
   tenant_id text NOT NULL REFERENCES tenants(id),

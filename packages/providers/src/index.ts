@@ -2,17 +2,18 @@ import { scrubSecrets } from "@agent-platform/audit";
 import type { EffectivePolicy } from "@agent-platform/policy";
 import type { RetentionContext } from "@agent-platform/retention";
 
+export type ToolCallRequest = {
+  id: string;
+  toolId: string;
+  args: Record<string, unknown>;
+};
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   name?: string;
   toolCallId?: string;
-};
-
-export type ToolCallRequest = {
-  id: string;
-  toolId: string;
-  args: Record<string, unknown>;
+  toolCalls?: ToolCallRequest[];
 };
 
 export type ChatCompletionRequest = {
@@ -88,9 +89,10 @@ export class MockProvider implements InferenceProvider {
 
   async completeChat(args: ChatCompletionRequest): Promise<ChatCompletionResult> {
     const userMessage = [...args.messages].reverse().find((message) => message.role === "user")?.content ?? "";
+    const toolMessages = args.messages.filter((message) => message.role === "tool");
     const systemNames = args.messages.filter((message) => message.role === "system").map((message) => message.name ?? "system");
     const toolCalls: ToolCallRequest[] = [];
-    if (userMessage.toLowerCase().includes("tool") && args.tools.length > 0) {
+    if (toolMessages.length === 0 && userMessage.toLowerCase().includes("tool") && args.tools.length > 0) {
       const tool = args.tools[0];
       if (tool) {
         toolCalls.push({
@@ -102,8 +104,12 @@ export class MockProvider implements InferenceProvider {
         });
       }
     }
+    const toolResultSummary =
+      toolMessages.length > 0
+        ? ` Tool results: ${toolMessages.map((message) => `${message.name ?? message.toolCallId ?? "tool"}=${message.content.slice(0, 120)}`).join("; ")}`
+        : "";
     return {
-      content: `Mock response (${args.modelId})${systemNames.length ? ` with ${systemNames.join(", ")}` : ""}: ${userMessage}`,
+      content: `Mock response (${args.modelId})${systemNames.length ? ` with ${systemNames.join(", ")}` : ""}: ${userMessage}${toolResultSummary}`,
       toolCalls,
       usage: {
         inputTokens: estimateTokens(args.messages.map((message) => message.content).join(" ")),
@@ -541,12 +547,24 @@ async function openAiStreamEvents(response: Response, provider: string): Promise
   };
 }
 
-function openAiMessageFromChatMessage(message: ChatMessage): Record<string, string> {
+function openAiMessageFromChatMessage(message: ChatMessage): Record<string, unknown> {
   return {
     role: message.role,
     content: message.content,
     ...(message.name ? { name: message.name } : {}),
-    ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {})
+    ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+    ...(message.role === "assistant" && message.toolCalls && message.toolCalls.length > 0
+      ? {
+          tool_calls: message.toolCalls.map((toolCall) => ({
+            id: toolCall.id,
+            type: "function",
+            function: {
+              name: toolCall.toolId,
+              arguments: JSON.stringify(toolCall.args)
+            }
+          }))
+        }
+      : {})
   };
 }
 

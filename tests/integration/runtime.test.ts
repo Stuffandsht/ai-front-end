@@ -56,9 +56,34 @@ describe("runtime integration", () => {
       priority: 1,
       createdBy: runtime.devUser.id
     });
+    const pluginConfig = uniqueSentinel("MCP_PLUGIN_SECRET");
+    const server = await runtime.db.createMcpServer({
+      name: "Secret MCP",
+      description: "MCP server with encrypted tenant config",
+      transportType: "http",
+      serverUrl: "https://mcp.example.test",
+      containerImage: null,
+      command: null,
+      argsJson: [],
+      envSecretRefsJson: ["env://MCP_API_KEY"],
+      riskLevel: "low",
+      retentionPolicyClass: "metadata_only_required",
+      enabled: true
+    });
+    await runtime.db.createPluginInstallation({
+      tenantId: runtime.tenant.id,
+      scopeType: "tenant",
+      scopeId: runtime.tenant.id,
+      mcpServerId: server.id,
+      enabled: true,
+      installedBy: runtime.devUser.id,
+      approvedBy: runtime.devUser.id,
+      config: pluginConfig
+    });
 
     expect(runtime.db.rawSearch(credential)).toBe(false);
     expect(runtime.db.rawSearch(prompt)).toBe(false);
+    expect(runtime.db.rawSearch(pluginConfig)).toBe(false);
   });
 
   it("registers OpenRouter tenant providers and models into effective policy inventory", async () => {
@@ -137,6 +162,131 @@ describe("runtime integration", () => {
       enabledToolIds: ["mock.read_context"]
     });
     expect(ephemeral.db.snapshot().toolInvocations.every((invocation) => invocation.argsCiphertextNullable == null && invocation.resultCiphertextNullable == null)).toBe(true);
+  });
+
+  it("runs a multi-step tool loop and feeds completed tool results back to the provider", async () => {
+    const runtime = await createTestRuntime();
+    const result = await runtime.runtime.runChat(runtime.devUser, {
+      message: "use tool context for this request",
+      requestedRetentionMode: "retained",
+      enabledToolIds: ["mock.read_context"]
+    });
+
+    expect(result.events.some((event) => event.type === "tool_call_requested" && event.toolCall.iteration === 0)).toBe(true);
+    expect(result.events.some((event) => event.type === "tool_call_completed" && event.toolResult.status === "completed")).toBe(true);
+    expect(result.events.some((event) => event.type === "message_delta" && event.iteration === 1)).toBe(true);
+    const messages = await runtime.db.listMessages(runtime.tenant.id, result.conversation?.id ?? "");
+    expect(messages.at(-1)?.content).toContain("Tool results:");
+  });
+
+  it("stops safely when a tool requires confirmation or the tool loop limit is reached", async () => {
+    const confirmationRuntime = await createTestRuntime();
+    const confirmation = await confirmationRuntime.runtime.runChat(confirmationRuntime.devUser, {
+      message: "use tool for a high risk action",
+      requestedRetentionMode: "retained",
+      enabledToolIds: ["mock.dangerous_action"]
+    });
+    expect(confirmation.events.some((event) => event.type === "tool_call_completed" && event.toolResult.status === "requires_confirmation")).toBe(true);
+    expect(confirmation.events.some((event) => event.type === "message_delta" && event.iteration === 1)).toBe(false);
+
+    const limitedRuntime = await createTestRuntime("single_company", { AGENT_MAX_TOOL_ITERATIONS: "0" });
+    const limited = await limitedRuntime.runtime.runChat(limitedRuntime.devUser, {
+      message: "use tool but stop immediately",
+      requestedRetentionMode: "retained",
+      enabledToolIds: ["mock.read_context"]
+    });
+    expect(limited.events.some((event) => event.type === "error" && event.error.code === "TOOL_ITERATION_LIMIT")).toBe(true);
+    expect(limitedRuntime.db.snapshot().toolInvocations).toHaveLength(0);
+  });
+
+  it("applies tenant platform policy bundles without registering executable tools", async () => {
+    const runtime = await createTestRuntime();
+    const secret = uniqueSentinel("PLATFORM_PLUGIN_CONFIG");
+    await runtime.db.createPlatformPluginInstallation({
+      tenantId: runtime.tenant.id,
+      scopeType: "tenant",
+      scopeId: runtime.tenant.id,
+      pluginId: "deny-context-tool",
+      manifestJson: {
+        id: "deny-context-tool",
+        name: "Deny Context Tool",
+        version: "0.1.0",
+        kind: "policy_bundle",
+        policyBundle: {
+          deniedToolIds: ["mock.read_context"]
+        }
+      },
+      enabled: true,
+      installedBy: runtime.devUser.id,
+      approvedBy: runtime.devUser.id,
+      config: secret
+    });
+    await runtime.refreshAdminState();
+
+    const policy = compileEffectivePolicy(
+      {
+        deploymentMode: runtime.config.deploymentMode,
+        tenantId: runtime.tenant.id,
+        userId: runtime.devUser.id,
+        groupIds: [],
+        requestedToolIds: ["mock.read_context"]
+      },
+      runtime.policyDocuments,
+      runtime.inventory
+    );
+
+    expect(policy.enabledToolIds).not.toContain("mock.read_context");
+    expect(policy.reasons.some((reason) => reason.code === "TOOL_DENY_OVERRIDE")).toBe(true);
+    expect(runtime.db.rawSearch(secret)).toBe(false);
+  });
+
+  it("registers tenant-installed stdio MCP tools and executes them through permission policy", async () => {
+    const runtime = await createTestRuntime();
+    const script = `payload=$(cat)
+case "$payload" in
+  *tools/list*) printf '%s' '{"tools":[{"id":"stdio.echo","name":"Echo","description":"Echo","riskLevel":"low"}]}' ;;
+  *) printf '%s' '{"result":{"echoed":true}}' ;;
+esac`;
+    const server = await runtime.db.createMcpServer({
+      name: "Echo stdio",
+      description: "Tenant-installed stdio MCP test server",
+      transportType: "stdio",
+      serverUrl: null,
+      containerImage: null,
+      command: "/bin/sh",
+      argsJson: ["-c", script],
+      envSecretRefsJson: ["env://STDIO_ECHO_TOKEN"],
+      riskLevel: "low",
+      retentionPolicyClass: "metadata_only_required",
+      enabled: true
+    });
+    await runtime.db.createPluginInstallation({
+      tenantId: runtime.tenant.id,
+      scopeType: "tenant",
+      scopeId: runtime.tenant.id,
+      mcpServerId: server.id,
+      enabled: true,
+      installedBy: runtime.devUser.id,
+      approvedBy: runtime.devUser.id,
+      config: null
+    });
+    await runtime.db.createToolPermission({
+      tenantId: runtime.tenant.id,
+      toolId: "stdio.echo",
+      subjectType: "tenant",
+      subjectId: runtime.tenant.id,
+      permission: "use",
+      requiresConfirmation: false
+    });
+    await runtime.refreshAdminState();
+
+    expect(runtime.inventory.toolIds).toContain("stdio.echo");
+    const result = await runtime.runtime.runChat(runtime.devUser, {
+      message: "use tool through stdio",
+      requestedRetentionMode: "retained",
+      enabledToolIds: ["stdio.echo"]
+    });
+    expect(result.events.some((event) => event.type === "tool_call_completed" && event.toolResult.toolId === "stdio.echo" && event.toolResult.status === "completed")).toBe(true);
   });
 
   it("writes metadata-only audit events for ephemeral requests", async () => {
