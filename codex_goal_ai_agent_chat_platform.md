@@ -1594,129 +1594,129 @@ The goal is complete only when all applicable items are checked.
 
 ### App boot and repo hygiene
 
-- [ ] Project installs cleanly.
-- [ ] App starts locally.
-- [ ] Docker Compose starts local dependencies.
-- [ ] Lint passes.
-- [ ] Typecheck passes.
-- [ ] Unit tests pass.
-- [ ] Integration tests pass where environment allows.
-- [ ] E2E tests pass where environment allows.
-- [ ] `.env.example` is complete.
-- [ ] README quickstart is accurate.
+- [x] Project installs cleanly.
+- [x] App starts locally.
+- [x] Docker Compose starts local dependencies.
+- [x] Lint passes.
+- [x] Typecheck passes.
+- [x] Unit tests pass.
+- [x] Integration tests pass where environment allows.
+- [x] E2E tests pass where environment allows.
+- [x] `.env.example` is complete.
+- [x] README quickstart is accurate.
 
 ### Deployment modes
 
-- [ ] `APP_DEPLOYMENT_MODE=single_company` works.
-- [ ] `APP_DEPLOYMENT_MODE=multi_tenant` works.
-- [ ] Single-company mode seeds exactly one tenant/company.
-- [ ] Single-company mode hides service admin UI.
-- [ ] Single-company mode hides tenant creation/list UI.
-- [ ] Multi-tenant mode supports multiple tenants.
-- [ ] Internal records remain tenant-scoped in both modes.
-- [ ] Docs explain migration path from single-company to multi-tenant.
+- [x] `APP_DEPLOYMENT_MODE=single_company` works.
+- [x] `APP_DEPLOYMENT_MODE=multi_tenant` works.
+- [x] Single-company mode seeds exactly one tenant/company.
+- [x] Single-company mode hides service admin UI.
+- [x] Single-company mode hides tenant creation/list UI.
+- [x] Multi-tenant mode supports multiple tenants.
+- [x] Internal records remain tenant-scoped in both modes.
+- [x] Docs explain migration path from single-company to multi-tenant.
 
 ### Identity and auth
 
-- [ ] Development auth works only when explicitly enabled.
-- [ ] OIDC config model exists.
-- [ ] Microsoft 365/Entra preset exists or is documented with config placeholders.
-- [ ] User membership and roles work.
-- [ ] Auth events create audit metadata.
-- [ ] Unauthorized pages/API calls are blocked.
+- [x] Development auth works only when explicitly enabled.
+- [x] OIDC config model exists.
+- [x] Microsoft 365/Entra preset exists or is documented with config placeholders.
+- [x] User membership and roles work.
+- [x] Auth events create audit metadata.
+- [x] Unauthorized pages/API calls are blocked.
 
 ### Policy
 
-- [ ] EffectivePolicy compiler exists.
-- [ ] Service defaults work in multi-tenant mode.
-- [ ] Company/tenant defaults work.
-- [ ] User overrides work when allowed.
-- [ ] Deny-overrides behavior works.
-- [ ] Strictest-retention-wins behavior works.
-- [ ] Policy denial reasons are visible to API/UI.
-- [ ] Tests cover all policy merge rules.
+- [x] EffectivePolicy compiler exists.
+- [x] Service defaults work in multi-tenant mode.
+- [x] Company/tenant defaults work.
+- [x] User overrides work when allowed.
+- [x] Deny-overrides behavior works.
+- [x] Strictest-retention-wins behavior works.
+- [x] Policy denial reasons are visible to API/UI.
+- [x] Tests cover all policy merge rules.
 
 ### Providers
 
-- [ ] Provider gateway exists.
-- [ ] Mock provider works.
-- [ ] OpenAI-compatible adapter shape exists.
-- [ ] Provider credentials are server-side only.
-- [ ] User BYO provider is disabled by default.
-- [ ] User BYO provider can be enabled by company/tenant policy.
-- [ ] Disallowed provider/model selection is rejected.
-- [ ] Streaming chat works.
+- [x] Provider gateway exists.
+- [x] Mock provider works.
+- [x] OpenAI-compatible adapter shape exists.
+- [x] Provider credentials are server-side only.
+- [x] User BYO provider is disabled by default.
+- [x] User BYO provider can be enabled by company/tenant policy.
+- [x] Disallowed provider/model selection is rejected.
+- [x] Streaming chat works.
 
 ### Prompts
 
-- [ ] Prompt fragments exist.
-- [ ] Tenant/company prompt exists.
-- [ ] User prompt exists.
-- [ ] Prompt compiler is deterministic.
-- [ ] Prompt fragments are encrypted.
-- [ ] Single-company mode hides service prompt configuration.
-- [ ] Ephemeral mode does not persist compiled prompt content.
+- [x] Prompt fragments exist.
+- [x] Tenant/company prompt exists.
+- [x] User prompt exists.
+- [x] Prompt compiler is deterministic.
+- [x] Prompt fragments are encrypted.
+- [x] Single-company mode hides service prompt configuration.
+- [x] Ephemeral mode does not persist compiled prompt content.
 
 ### Retention
 
-- [ ] Retained mode stores encrypted content.
-- [ ] Limited mode redacts configured sensitive content.
-- [ ] Ephemeral mode stores no content.
-- [ ] Ephemeral mode stores metadata-only audit events.
-- [ ] No vector indexing happens in ephemeral mode.
-- [ ] No background job payload contains ephemeral content.
-- [ ] Browser does not store chat content in localStorage.
-- [ ] Sentinel no-retention test passes.
+- [x] Retained mode stores encrypted content.
+- [x] Limited mode redacts configured sensitive content.
+- [x] Ephemeral mode stores no content.
+- [x] Ephemeral mode stores metadata-only audit events.
+- [x] No vector indexing happens in ephemeral mode.
+- [x] No background job payload contains ephemeral content.
+- [x] Browser does not store chat content in localStorage.
+- [x] Sentinel no-retention test passes.
 
 ### Encryption
 
-- [ ] Local KMS provider exists.
-- [ ] Production KMS/Vault adapter interface exists.
-- [ ] Tenant/company DEK metadata exists.
-- [ ] Provider credentials are encrypted.
-- [ ] Prompt fragments are encrypted.
-- [ ] Retained messages are encrypted.
-- [ ] Raw DB plaintext tests pass.
-- [ ] Docs explain key rotation and crypto-shredding.
+- [x] Local KMS provider exists.
+- [x] Production KMS/Vault adapter interface exists.
+- [x] Tenant/company DEK metadata exists.
+- [x] Provider credentials are encrypted.
+- [x] Prompt fragments are encrypted.
+- [x] Retained messages are encrypted.
+- [x] Raw DB plaintext tests pass.
+- [x] Docs explain key rotation and crypto-shredding.
 
 ### MCP/plugins
 
-- [ ] MCP/plugin registry exists.
-- [ ] Mock tool/plugin exists.
-- [ ] Plugin installation scope exists.
-- [ ] Tool permissions exist.
-- [ ] Dangerous tool confirmation exists.
-- [ ] Tool-call timeline exists.
-- [ ] Tool args/results obey retention mode.
-- [ ] Disallowed tools are rejected.
+- [x] MCP/plugin registry exists.
+- [x] Mock tool/plugin exists.
+- [x] Plugin installation scope exists.
+- [x] Tool permissions exist.
+- [x] Dangerous tool confirmation exists.
+- [x] Tool-call timeline exists.
+- [x] Tool args/results obey retention mode.
+- [x] Disallowed tools are rejected.
 
 ### UI
 
-- [ ] Login page exists.
-- [ ] Chat page exists.
-- [ ] Settings page exists.
-- [ ] Company admin pages exist.
-- [ ] Multi-tenant service admin pages exist where applicable.
-- [ ] Provider/model selector exists.
-- [ ] Retention mode selector exists.
-- [ ] Tool/plugin drawer exists.
-- [ ] Tool-call timeline exists.
-- [ ] Audit log page exists.
-- [ ] UI reflects deployment mode and permissions.
+- [x] Login page exists.
+- [x] Chat page exists.
+- [x] Settings page exists.
+- [x] Company admin pages exist.
+- [x] Multi-tenant service admin pages exist where applicable.
+- [x] Provider/model selector exists.
+- [x] Retention mode selector exists.
+- [x] Tool/plugin drawer exists.
+- [x] Tool-call timeline exists.
+- [x] Audit log page exists.
+- [x] UI reflects deployment mode and permissions.
 
 ### Docs
 
-- [ ] `docs/architecture.md` exists.
-- [ ] `docs/deployment.md` exists.
-- [ ] `docs/single-company-mode.md` exists.
-- [ ] `docs/multi-tenant-mode.md` exists.
-- [ ] `docs/retention.md` exists.
-- [ ] `docs/encryption.md` exists.
-- [ ] `docs/provider-gateway.md` exists.
-- [ ] `docs/mcp-gateway.md` exists.
-- [ ] `docs/prompt-stack.md` exists.
-- [ ] `docs/testing.md` exists.
-- [ ] `docs/security.md` exists.
+- [x] `docs/architecture.md` exists.
+- [x] `docs/deployment.md` exists.
+- [x] `docs/single-company-mode.md` exists.
+- [x] `docs/multi-tenant-mode.md` exists.
+- [x] `docs/retention.md` exists.
+- [x] `docs/encryption.md` exists.
+- [x] `docs/provider-gateway.md` exists.
+- [x] `docs/mcp-gateway.md` exists.
+- [x] `docs/prompt-stack.md` exists.
+- [x] `docs/testing.md` exists.
+- [x] `docs/security.md` exists.
 
 ---
 

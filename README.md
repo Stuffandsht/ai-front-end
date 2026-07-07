@@ -73,4 +73,4 @@ docs                     architecture and operation docs
 - `APP_DATABASE_MODE=postgres` runs the live app against Postgres via `DATABASE_URL`; Docker/Compose startup applies the baseline migration before Next.js starts.
 - OIDC/Microsoft Entra is wired through discovery, authorization-code token exchange, JWKS-backed ID-token verification, JIT user provisioning, and metadata-only auth audit events when `OIDC_*` settings are configured.
 - OpenAI-compatible providers, encrypted provider credentials, Vault Transit KMS, and guarded HTTP/stdio MCP adapters are implemented behind server-side configuration gates.
-- Browser e2e tests run with Playwright Chromium. In this environment, `npm run test:e2e` cannot auto-start `next dev` due `listen EPERM`, so run `test:e2e` where host port binding is allowed.
+- Browser e2e tests run with Playwright Chromium and require permission to bind a local Next.js server on port 3000.

@@ -26,8 +26,11 @@ Completed:
 - Added unit, integration, security, fast e2e, and browser e2e tests.
 - Added Playwright Chromium browser e2e coverage for login, retained chat, single-company admin hiding, and browser storage behavior.
 - Added required documentation files.
+- Audited and checked the first-pass acceptance checklist in `codex_goal_ai_agent_chat_platform.md` against implementation and validation evidence.
 
 Validation performed:
+- command: `npm install`
+  result: pass, dependencies already up to date
 - command: `npm run typecheck`
   result: pass
 - command: `npm run test`
@@ -35,11 +38,11 @@ Validation performed:
 - command: `npm run test:integration`
   result: pass, including migration execution and SQL-backed retained/ephemeral chat runtime tests
 - command: `npm run test:e2e`
-  result: currently failing in this execution environment because `next dev` exits with `listen EPERM` when auto-started by Playwright webServer
+  result: pass with Playwright Chromium browser tests when run with host-level local bind permission
 - command: `npm run test:e2e:headless`
   result: pass for fast runtime/static e2e checks
 - command: `npm run test:all`
-  result: fails when Playwright webServer fails to bind (`listen EPERM`); other stages pass (lint, typecheck, unit/security, integration, headless e2e)
+  result: pass when run with host-level local bind permission; includes lint, typecheck, unit/security, integration, headless e2e, and browser e2e
 - command: `npm run lint`
   result: pass
 - command: `npm run build`
@@ -62,16 +65,18 @@ Validation performed:
   result: pass, listed services: redis, minio, postgres, app
 - command: `APP_DEPLOYMENT_MODE=multi_tenant docker compose --profile multi-tenant config --services`
   result: pass, listed services: minio, postgres, redis, app
+- command: `APP_DEPLOYMENT_MODE=single_company docker compose --profile single-company up -d --build`
+  result: pass through `sg docker`, built the app image and started app, Postgres, Valkey, and MinIO
 - command: `curl -s -f http://127.0.0.1:3000/api/config/public`
   result: pass against the Compose-launched app, returned single-company public config
 - command: Compose-launched dev login and retained `POST /api/chat`
   result: pass through the Postgres-backed runtime, returned policy event, stream deltas, and retained message id
 - command: raw Compose Postgres row check after retained chat
-  result: pass, found retained message/conversation/audit rows across persistent-volume restarts and no plaintext sentinel in raw message rows
+  result: pass, found retained message/conversation/audit rows and no plaintext sentinel in raw message rows
 - command: Compose-launched retention policy PATCH and provider POST with API key
   result: pass, wrote durable retention and provider rows, encrypted one provider credential, and raw Postgres search found no plaintext provider secret
-- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company down`
-  result: pass after full-stack smoke test; `podman ps -a` returned no remaining containers
+- command: `APP_DEPLOYMENT_MODE=single_company docker compose --profile single-company down`
+  result: pass after full-stack smoke test; `docker ps` returned no running containers
 - command: `ALLOW_DEV_AUTH=true npm run dev`
   result: pass, server ready at http://localhost:3000
 - command: `curl -s http://localhost:3000/api/config/public`
@@ -100,7 +105,7 @@ Validation performed:
 Known limitations:
 - The default local npm path still uses the in-memory repository so the app can run without local services; set `APP_DATABASE_MODE=postgres` for durable runtime state.
 - No real external IdP, OpenAI-compatible provider, Vault, or MCP server credentials/endpoints are available in this environment; those live code paths are covered with mocked network/process tests.
-- Docker Engine and Docker Compose v5.3.0 are available. Compose profile rendering is validated for both deployment modes; full single-company smoke testing was previously completed in this environment before the current tool session’s Docker socket access limitation.
+- Docker Engine and Docker Compose v5.3.0 are available. Compose profile rendering is validated for both deployment modes, and the single-company stack smoke test passes when Docker daemon access is run through the `docker` group.
 
 Manual verification:
 - Single-company runtime login seed creates one company tenant.
