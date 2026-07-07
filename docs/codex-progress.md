@@ -20,7 +20,7 @@ Completed:
 - Implemented OpenAI-compatible `/chat/completions` calls with server-side encrypted credential loading and redacted provider errors.
 - Implemented Vault Transit KMS wrapping/unwrapping and guarded HTTP/stdio MCP adapter execution paths behind explicit enablement gates.
 - Upgraded migration validation to execute the SQL migration in an embedded Postgres-compatible database.
-- Rendered single-company and multi-tenant Compose profiles through Podman Compose and smoke-tested the full single-company stack with the Postgres-backed app runtime because the Docker Compose CLI plugin is absent in this environment.
+- Rendered single-company and multi-tenant Compose profiles through Docker Compose v5.3.0 and smoke-tested the full single-company stack with the Postgres-backed app runtime.
 - Added `.dockerignore` and fully qualified container image references for non-interactive Compose/Podman compatibility.
 - Built required UI pages and deployment-mode hiding for service/tenant admin surfaces.
 - Added unit, integration, security, fast e2e, and browser e2e tests.
@@ -35,11 +35,11 @@ Validation performed:
 - command: `npm run test:integration`
   result: pass, including migration execution and SQL-backed retained/ephemeral chat runtime tests
 - command: `npm run test:e2e`
-  result: pass with Playwright Chromium browser tests
+  result: currently failing in this execution environment because `next dev` exits with `listen EPERM` when auto-started by Playwright webServer
 - command: `npm run test:e2e:headless`
   result: pass for fast runtime/static e2e checks
 - command: `npm run test:all`
-  result: pass with local-bind approval for Playwright; includes lint, typecheck, unit/security, integration, headless e2e, and browser e2e
+  result: fails when Playwright webServer fails to bind (`listen EPERM`); other stages pass (lint, typecheck, unit/security, integration, headless e2e)
 - command: `npm run lint`
   result: pass
 - command: `npm run build`
@@ -55,25 +55,13 @@ Validation performed:
 - command: `npm run compose:check`
   result: pass
 - command: `docker compose --profile single-company config`
-  result: not run successfully because the Docker Compose CLI plugin is not installed in this environment
-- command: `docker compose --profile multi-tenant config`
-  result: not run successfully because the Docker Compose CLI plugin is not installed in this environment
-- command: `python3 -m pip install --user podman-compose`
-  result: pass, installed a user-level Compose provider for Podman because Docker Compose is absent
-- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company config`
   result: pass, rendered app, Postgres, Valkey, and MinIO services
-- command: `APP_DEPLOYMENT_MODE=multi_tenant podman compose --profile multi-tenant config`
-  result: pass, rendered app, Postgres, Valkey, and MinIO services with `APP_DEPLOYMENT_MODE=multi_tenant`
-- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company up -d postgres redis minio`
-  result: pass, pulled fully qualified images and started Postgres, Valkey, and MinIO through Compose
-- command: `podman inspect ai-front-end_postgres_1 --format '{{.State.Health.Status}}'`
-  result: pass, returned `healthy`
-- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company down`
-  result: pass, removed smoke-test containers; `podman ps -a` returned no remaining containers
-- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company build app`
-  result: pass, built the Next.js app image from `infra/docker/Dockerfile`
-- command: `APP_DEPLOYMENT_MODE=single_company podman compose --profile single-company up -d --build`
-  result: pass, built the app image, skipped an already-present baseline migration idempotently, and started app, Postgres, Valkey, and MinIO
+- command: `docker compose --profile multi-tenant config`
+  result: pass, rendered app, Postgres, Valkey, and MinIO services
+- command: `APP_DEPLOYMENT_MODE=single_company docker compose --profile single-company config --services`
+  result: pass, listed services: redis, minio, postgres, app
+- command: `APP_DEPLOYMENT_MODE=multi_tenant docker compose --profile multi-tenant config --services`
+  result: pass, listed services: minio, postgres, redis, app
 - command: `curl -s -f http://127.0.0.1:3000/api/config/public`
   result: pass against the Compose-launched app, returned single-company public config
 - command: Compose-launched dev login and retained `POST /api/chat`
@@ -112,7 +100,7 @@ Validation performed:
 Known limitations:
 - The default local npm path still uses the in-memory repository so the app can run without local services; set `APP_DATABASE_MODE=postgres` for durable runtime state.
 - No real external IdP, OpenAI-compatible provider, Vault, or MCP server credentials/endpoints are available in this environment; those live code paths are covered with mocked network/process tests.
-- Docker Engine is available, but the Docker Compose CLI plugin is not installed, so exact `docker compose ...` validation was not performed. Equivalent Podman Compose profile rendering and full single-company stack smoke testing passed.
+- Docker Engine and Docker Compose v5.3.0 are available. Compose profile rendering is validated for both deployment modes; full single-company smoke testing was previously completed in this environment before the current tool session’s Docker socket access limitation.
 
 Manual verification:
 - Single-company runtime login seed creates one company tenant.

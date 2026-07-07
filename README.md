@@ -19,16 +19,28 @@ For durable local runtime state, set `APP_DATABASE_MODE=postgres`, start Postgre
 ## Validation
 
 ```bash
+npm run test:all
 npm run lint
 npm run typecheck
 npm run test
 npm run test:integration
 npm run test:e2e
+docker compose --profile single-company config
+docker compose --profile multi-tenant config
 npm run build
 npm run compose:check
 ```
 
-This environment has Docker Engine but not the Docker Compose CLI plugin. The compose profiles were rendered with a user-level Podman Compose provider, and the single-company stack was smoke-tested with the Postgres-backed app runtime. The same file can be launched on a host with Docker Compose:
+This environment has Docker Compose CLI plugin v5.3.0 available. The compose profiles were validated with:
+
+```bash
+docker compose --profile single-company config
+docker compose --profile single-company config --services
+docker compose --profile multi-tenant config
+docker compose --profile multi-tenant config --services
+```
+
+A host with Docker Engine and Docker Compose can launch the services with:
 
 ```bash
 docker compose --profile dev up --build
@@ -61,4 +73,4 @@ docs                     architecture and operation docs
 - `APP_DATABASE_MODE=postgres` runs the live app against Postgres via `DATABASE_URL`; Docker/Compose startup applies the baseline migration before Next.js starts.
 - OIDC/Microsoft Entra is wired through discovery, authorization-code token exchange, JWKS-backed ID-token verification, JIT user provisioning, and metadata-only auth audit events when `OIDC_*` settings are configured.
 - OpenAI-compatible providers, encrypted provider credentials, Vault Transit KMS, and guarded HTTP/stdio MCP adapters are implemented behind server-side configuration gates.
-- Browser e2e tests run with Playwright Chromium; this environment validated Compose through Podman because the Docker Compose CLI plugin is absent.
+- Browser e2e tests run with Playwright Chromium. In this environment, `npm run test:e2e` cannot auto-start `next dev` due `listen EPERM`, so run `test:e2e` where host port binding is allowed.
