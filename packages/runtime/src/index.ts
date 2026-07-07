@@ -21,7 +21,7 @@ import {
   type ProviderInventory
 } from "@agent-platform/policy";
 import { compilePromptStack, loadPromptFragmentSources, renderCompiledPrompt, type CompiledPrompt } from "@agent-platform/prompts";
-import { MockProvider, OpenAICompatibleProvider, ProviderGateway, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from "@agent-platform/providers";
+import { MockProvider, OpenAICompatibleProvider, OpenRouterProvider, ProviderGateway, type ChatCompletionResult, type ChatMessage, type ToolCallRequest } from "@agent-platform/providers";
 import { buildRetentionContext, type RetentionMode } from "@agent-platform/retention";
 
 type MaybePromise<T> = T | Promise<T>;
@@ -745,7 +745,7 @@ async function buildAdminState(config: AppConfig, db: AdminStateDatabase, tenant
         providers.register(new MockProvider());
         mockRegistered = true;
       }
-    } else if (providerConfig.providerType === "openai_compatible") {
+    } else if (providerConfig.providerType === "openai_compatible" || providerConfig.providerType === "openrouter") {
       if (providerConfig.authMode === "user_key") {
         continue;
       }
@@ -760,7 +760,19 @@ async function buildAdminState(config: AppConfig, db: AdminStateDatabase, tenant
       if (!providerConfig.baseUrl || (providerConfig.authMode !== "none" && !secret)) {
         continue;
       }
-      providers.register(new OpenAICompatibleProvider({ id: providerId, baseUrl: providerConfig.baseUrl, apiKey: secret ?? "" }));
+      if (providerConfig.providerType === "openrouter") {
+        providers.register(
+          new OpenRouterProvider({
+            id: providerId,
+            baseUrl: providerConfig.baseUrl,
+            apiKey: secret ?? "",
+            appUrl: config.publicBaseUrl,
+            appTitle: tenant.name
+          })
+        );
+      } else {
+        providers.register(new OpenAICompatibleProvider({ id: providerId, baseUrl: providerConfig.baseUrl, apiKey: secret ?? "" }));
+      }
     } else {
       continue;
     }

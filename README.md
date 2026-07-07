@@ -67,6 +67,10 @@ db/migrations            Postgres baseline schema
 docs                     architecture and operation docs
 ```
 
+## Provider Setup
+
+OpenRouter is supported as a first-class provider. Company/tenant admins can add an OpenRouter API key from `/admin/providers`, sync the OpenRouter model catalog into tenant-scoped model configuration, and then use the synced provider/model IDs through the normal policy compiler. OpenRouter credentials are encrypted server-side and are never returned to the browser.
+
 ## Current Limitations
 
 - The app defaults to the in-memory repository for local no-service development; a SQL-backed runtime repository is implemented and tested through an embedded Postgres-compatible engine.

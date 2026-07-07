@@ -41,4 +41,14 @@ describe("headless e2e acceptance", () => {
     expect(settingsPage).toContain("byoAllowed");
     expect(settingsPage).toContain("BYO credential reference");
   });
+
+  it("provider admin supports first-class OpenRouter configuration and model sync", () => {
+    const providersPage = readFileSync("apps/web/src/app/admin/providers/page.tsx", "utf8");
+    const syncRoute = readFileSync("apps/web/src/app/api/providers/[id]/sync-models/route.ts", "utf8");
+
+    expect(providersPage).toContain("createOpenRouterProviderAction");
+    expect(providersPage).toContain("Sync models");
+    expect(syncRoute).toContain("OpenRouterProvider");
+    expect(syncRoute).toContain("createModelConfig");
+  });
 });

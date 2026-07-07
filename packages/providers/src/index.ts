@@ -6,6 +6,7 @@ export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   name?: string;
+  toolCallId?: string;
 };
 
 export type ToolCallRequest = {
@@ -66,6 +67,12 @@ export type ModelDescriptor = {
   displayName: string;
   supportsTools: boolean;
   supportsStreaming: boolean;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  supportsJsonSchema?: boolean;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  pricing?: Record<string, string>;
 };
 
 export interface InferenceProvider {
@@ -155,18 +162,24 @@ export class OpenAICompatibleProvider implements InferenceProvider {
       id: string;
       baseUrl: string;
       apiKey: string;
+      defaultHeaders?: Record<string, string | undefined>;
+      providerMetadataName?: string;
       fetchImpl?: typeof fetch;
     }
   ) {
     this.id = args.id;
     this.baseUrl = validateProviderBaseUrl(args.baseUrl).replace(/\/$/, "");
     this.apiKey = args.apiKey;
+    this.defaultHeaders = args.defaultHeaders ?? {};
+    this.providerMetadataName = args.providerMetadataName ?? "openai_compatible";
     this.fetchImpl = args.fetchImpl ?? fetch;
   }
 
-  private readonly baseUrl: string;
-  private readonly apiKey: string;
-  private readonly fetchImpl: typeof fetch;
+  protected readonly baseUrl: string;
+  protected readonly apiKey: string;
+  protected readonly defaultHeaders: Record<string, string | undefined>;
+  protected readonly providerMetadataName: string;
+  protected readonly fetchImpl: typeof fetch;
 
   buildChatRequest(args: ChatCompletionRequest): {
     url: string;
@@ -182,28 +195,20 @@ export class OpenAICompatibleProvider implements InferenceProvider {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          ...definedHeaders(this.defaultHeaders),
           ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {})
         },
-        body: JSON.stringify({
-          model: args.modelId,
-          messages: args.messages.map((message) => ({
-            role: message.role,
-            content: message.content,
-            name: message.name
-          })),
-          stream: false,
-          tools: args.tools.map((tool) => ({
-            type: "function",
-            function: {
-              name: tool.id,
-              description: tool.description,
-              parameters: {
-                type: "object"
-              }
-            }
-          }))
-        })
+        body: JSON.stringify(this.buildChatBody(args, false))
       }
+    };
+  }
+
+  protected buildChatBody(args: ChatCompletionRequest, stream: boolean): Record<string, unknown> {
+    return {
+      model: args.modelId,
+      messages: args.messages.map(openAiMessageFromChatMessage),
+      stream,
+      ...(args.tools.length > 0 ? { tools: openAiToolsFromRuntimeTools(args.tools) } : {})
     };
   }
 
@@ -215,7 +220,7 @@ export class OpenAICompatibleProvider implements InferenceProvider {
       if (!response.ok) {
         throw new Error(`OpenAI-compatible provider returned HTTP ${response.status}: ${safeErrorBody(bodyText)}`);
       }
-      return openAiChatResponseToResult(JSON.parse(bodyText) as OpenAIChatResponse);
+      return openAiChatResponseToResult(JSON.parse(bodyText) as OpenAIChatResponse, this.providerMetadataName);
     } catch (error) {
       throw this.redactError(error);
     }
@@ -235,31 +240,193 @@ export class OpenAICompatibleProvider implements InferenceProvider {
   }
 }
 
+export type OpenRouterProviderPreferences = {
+  order?: string[];
+  only?: string[];
+  ignore?: string[];
+  sort?: "price" | "throughput" | "latency";
+  allow_fallbacks?: boolean;
+  data_collection?: "allow" | "deny";
+  zdr?: boolean;
+};
+
+export class OpenRouterProvider implements InferenceProvider {
+  readonly id: string;
+
+  constructor(
+    args: {
+      id?: string;
+      apiKey: string;
+      baseUrl?: string;
+      appUrl?: string;
+      appTitle?: string;
+      defaultProviderPreferences?: OpenRouterProviderPreferences;
+      fetchImpl?: typeof fetch;
+    }
+  ) {
+    this.id = args.id ?? "openrouter";
+    this.baseUrl = validateProviderBaseUrl(args.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
+    this.apiKey = args.apiKey;
+    this.appUrl = args.appUrl;
+    this.appTitle = args.appTitle;
+    this.defaultProviderPreferences = args.defaultProviderPreferences ?? {};
+    this.fetchImpl = args.fetchImpl ?? fetch;
+  }
+
+  private readonly baseUrl: string;
+  private readonly apiKey: string;
+  private readonly appUrl: string | undefined;
+  private readonly appTitle: string | undefined;
+  private readonly defaultProviderPreferences: OpenRouterProviderPreferences;
+  private readonly fetchImpl: typeof fetch;
+
+  buildChatRequest(args: ChatCompletionRequest, stream = false): {
+    url: string;
+    init: {
+      method: "POST";
+      headers: Record<string, string>;
+      body: string;
+    };
+  } {
+    return {
+      url: `${this.baseUrl}/chat/completions`,
+      init: {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify({
+          model: args.modelId,
+          messages: args.messages.map(openAiMessageFromChatMessage),
+          stream,
+          ...(args.tools.length > 0 ? { tools: openAiToolsFromRuntimeTools(args.tools), tool_choice: "auto" } : {}),
+          provider: openRouterProviderPreferences(args.retention, this.defaultProviderPreferences),
+          user: args.userId
+        })
+      }
+    };
+  }
+
+  async completeChat(args: ChatCompletionRequest): Promise<ChatCompletionResult> {
+    const request = this.buildChatRequest(args, false);
+    try {
+      const response = await this.fetchImpl(request.url, request.init);
+      const bodyText = await response.text();
+      if (!response.ok) {
+        throw new Error(`OpenRouter returned HTTP ${response.status}: ${safeErrorBody(bodyText)}`);
+      }
+      return openAiChatResponseToResult(JSON.parse(bodyText) as OpenAIChatResponse, "openrouter");
+    } catch (error) {
+      throw this.redactError(error);
+    }
+  }
+
+  async *streamChat(args: ChatCompletionRequest): AsyncIterable<ChatCompletionStreamEvent> {
+    const request = this.buildChatRequest(args, true);
+    try {
+      const response = await this.fetchImpl(request.url, request.init);
+      if (!response.ok) {
+        throw new Error(`OpenRouter returned HTTP ${response.status}: ${safeErrorBody(await response.text())}`);
+      }
+      const aggregate = await openAiStreamEvents(response, "openrouter");
+      for (const delta of aggregate.deltas) {
+        yield {
+          type: "delta",
+          delta
+        };
+      }
+      for (const toolCall of aggregate.result.toolCalls) {
+        yield {
+          type: "tool_call",
+          toolCall
+        };
+      }
+      yield {
+        type: "done",
+        result: aggregate.result
+      };
+    } catch (error) {
+      throw this.redactError(error);
+    }
+  }
+
+  async listModels(): Promise<ModelDescriptor[]> {
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/models`, {
+        method: "GET",
+        headers: this.headers()
+      });
+      const bodyText = await response.text();
+      if (!response.ok) {
+        throw new Error(`OpenRouter model catalog returned HTTP ${response.status}: ${safeErrorBody(bodyText)}`);
+      }
+      return openRouterModelsToDescriptors(JSON.parse(bodyText) as OpenRouterModelsResponse);
+    } catch (error) {
+      throw this.redactError(error);
+    }
+  }
+
+  redactError(error: unknown): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    return new Error(this.apiKey ? message.replaceAll(this.apiKey, "[redacted]") : message);
+  }
+
+  private headers(): Record<string, string> {
+    return {
+      "content-type": "application/json",
+      ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+      ...(this.appUrl ? { "HTTP-Referer": this.appUrl } : {}),
+      ...(this.appTitle ? { "X-OpenRouter-Title": this.appTitle } : {})
+    };
+  }
+}
+
 type OpenAIChatResponse = {
   id?: string;
   model?: string;
   choices?: Array<{
     finish_reason?: string;
-    message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
-      tool_calls?: Array<{
-        id?: string;
-        function?: {
-          name?: string;
-          arguments?: string;
-        };
-      }>;
-    };
+    message?: OpenAIChatMessage;
+    delta?: Partial<OpenAIChatMessage>;
   }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
     input_tokens?: number;
     output_tokens?: number;
+    cost?: number;
   };
 };
 
-function openAiChatResponseToResult(payload: OpenAIChatResponse): ChatCompletionResult {
+type OpenAIChatMessage = {
+  content?: string | Array<{ type?: string; text?: string }>;
+  tool_calls?: Array<{
+    id?: string;
+    index?: number;
+    function?: {
+      name?: string;
+      arguments?: string;
+    };
+  }>;
+};
+
+type OpenRouterModelsResponse = {
+  data?: Array<{
+    id?: string;
+    name?: string;
+    context_length?: number;
+    top_provider?: {
+      context_length?: number;
+      max_completion_tokens?: number;
+    } | null;
+    supported_parameters?: string[];
+    architecture?: {
+      input_modalities?: string[];
+      output_modalities?: string[];
+    } | null;
+    pricing?: Record<string, string>;
+  }>;
+};
+
+function openAiChatResponseToResult(payload: OpenAIChatResponse, provider: string): ChatCompletionResult {
   const choice = payload.choices?.[0];
   const message = choice?.message;
   const content = typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.flatMap((part) => (part.text ? [part.text] : [])).join("") : "";
@@ -284,12 +451,155 @@ function openAiChatResponseToResult(payload: OpenAIChatResponse): ChatCompletion
       outputTokens: payload.usage?.completion_tokens ?? payload.usage?.output_tokens ?? 0
     },
     providerMetadata: {
-      provider: "openai_compatible",
+      provider,
       responseId: payload.id ?? null,
       model: payload.model ?? null,
-      finishReason: choice?.finish_reason ?? null
+      finishReason: choice?.finish_reason ?? null,
+      ...(typeof payload.usage?.cost === "number" ? { cost: payload.usage.cost } : {})
     }
   };
+}
+
+async function openAiStreamEvents(response: Response, provider: string): Promise<{ deltas: string[]; result: ChatCompletionResult }> {
+  if (!response.body) {
+    throw new Error("Streaming response did not include a body");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const deltas: string[] = [];
+  const toolCalls = new Map<number, { id?: string; name?: string; arguments: string }>();
+  const usage: ChatCompletionResult["usage"] = { inputTokens: 0, outputTokens: 0 };
+  let responseId: string | null = null;
+  let model: string | null = null;
+  let finishReason: string | null = null;
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) {
+        continue;
+      }
+      const data = trimmed.slice("data:".length).trim();
+      if (data === "[DONE]") {
+        continue;
+      }
+      const chunk = JSON.parse(data) as OpenAIChatResponse;
+      responseId = chunk.id ?? responseId;
+      model = chunk.model ?? model;
+      usage.inputTokens = chunk.usage?.prompt_tokens ?? chunk.usage?.input_tokens ?? usage.inputTokens;
+      usage.outputTokens = chunk.usage?.completion_tokens ?? chunk.usage?.output_tokens ?? usage.outputTokens;
+      const choice = chunk.choices?.[0];
+      finishReason = choice?.finish_reason ?? finishReason;
+      const content = choice?.delta?.content;
+      if (typeof content === "string" && content.length > 0) {
+        deltas.push(content);
+      }
+      for (const toolCall of choice?.delta?.tool_calls ?? []) {
+        const index = toolCall.index ?? toolCalls.size;
+        const current = toolCalls.get(index) ?? { arguments: "" };
+        toolCalls.set(index, {
+          ...(toolCall.id ?? current.id ? { id: toolCall.id ?? current.id } : {}),
+          ...(toolCall.function?.name ?? current.name ? { name: toolCall.function?.name ?? current.name } : {}),
+          arguments: `${current.arguments}${toolCall.function?.arguments ?? ""}`
+        });
+      }
+    }
+    if (done) {
+      break;
+    }
+  }
+
+  const content = deltas.join("");
+  return {
+    deltas,
+    result: {
+      content,
+      toolCalls: [...toolCalls.entries()].flatMap(([index, toolCall]) =>
+        toolCall.name
+          ? [
+              {
+                id: toolCall.id ?? `toolcall_${index}`,
+                toolId: toolCall.name,
+                args: parseToolArguments(toolCall.arguments)
+              }
+            ]
+          : []
+      ),
+      usage,
+      providerMetadata: {
+        provider,
+        responseId,
+        model,
+        finishReason
+      }
+    }
+  };
+}
+
+function openAiMessageFromChatMessage(message: ChatMessage): Record<string, string> {
+  return {
+    role: message.role,
+    content: message.content,
+    ...(message.name ? { name: message.name } : {}),
+    ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {})
+  };
+}
+
+function openAiToolsFromRuntimeTools(tools: ChatCompletionRequest["tools"]): Array<Record<string, unknown>> {
+  return tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.id,
+      description: tool.description,
+      parameters: {
+        type: "object",
+        additionalProperties: true
+      }
+    }
+  }));
+}
+
+function openRouterProviderPreferences(retention: RetentionContext, defaults: OpenRouterProviderPreferences): OpenRouterProviderPreferences {
+  return {
+    ...defaults,
+    ...(retention.mode === "ephemeral" ? { data_collection: "deny", zdr: true } : {}),
+    ...(retention.mode === "limited" ? { data_collection: "deny" } : {})
+  };
+}
+
+function openRouterModelsToDescriptors(payload: OpenRouterModelsResponse): ModelDescriptor[] {
+  return (
+    payload.data?.flatMap((model) => {
+      if (!model.id) {
+        return [];
+      }
+      const supported = new Set(model.supported_parameters ?? []);
+      const descriptor: ModelDescriptor = {
+        id: model.id,
+        displayName: model.name ?? model.id,
+        contextWindow: model.top_provider?.context_length ?? model.context_length ?? 8192,
+        maxOutputTokens: model.top_provider?.max_completion_tokens ?? 1024,
+        supportsTools: supported.has("tools"),
+        supportsStreaming: true,
+        supportsJsonSchema: supported.has("response_format"),
+        inputModalities: model.architecture?.input_modalities ?? ["text"],
+        outputModalities: model.architecture?.output_modalities ?? ["text"],
+        ...(model.pricing ? { pricing: model.pricing } : {})
+      };
+      return [
+        descriptor
+      ];
+    }) ?? []
+  );
+}
+
+function definedHeaders(headers: Record<string, string | undefined>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0));
 }
 
 function parseToolArguments(value: string | undefined): Record<string, unknown> {

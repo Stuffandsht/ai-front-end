@@ -327,7 +327,7 @@ export class SqlRuntimeDatabase {
     tenantId: string;
     scopeType: "service" | "tenant" | "user";
     scopeId: string;
-    providerType: "mock" | "openai_compatible" | "anthropic_compatible" | "azure_openai" | "ollama" | "custom_http";
+    providerType: "mock" | "openrouter" | "openai_compatible" | "anthropic_compatible" | "azure_openai" | "ollama" | "custom_http";
     displayName: string;
     baseUrl: string | null;
     authMode: "none" | "service_key" | "tenant_key" | "user_key";

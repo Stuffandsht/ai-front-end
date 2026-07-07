@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildRetentionContext } from "@agent-platform/retention";
+import { compileEffectivePolicy } from "@agent-platform/policy";
 import { createTestRuntime, uniqueSentinel } from "@agent-platform/test-utils";
 
 describe("runtime integration", () => {
@@ -58,6 +59,66 @@ describe("runtime integration", () => {
 
     expect(runtime.db.rawSearch(credential)).toBe(false);
     expect(runtime.db.rawSearch(prompt)).toBe(false);
+  });
+
+  it("registers OpenRouter tenant providers and models into effective policy inventory", async () => {
+    const runtime = await createTestRuntime();
+    const credential = uniqueSentinel("OPENROUTER_SECRET");
+    const provider = await runtime.db.createProviderConfig({
+      tenantId: runtime.tenant.id,
+      scopeType: "tenant",
+      scopeId: runtime.tenant.id,
+      providerType: "openrouter",
+      displayName: "OpenRouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      authMode: "tenant_key",
+      credentialRef: "secret://tenant/provider/openrouter",
+      retentionPolicyClass: "standard",
+      supportsStreaming: true,
+      supportsToolCalling: true,
+      supportsJsonSchema: true,
+      supportsEmbeddings: false,
+      enabled: true
+    });
+    await runtime.db.createProviderCredential({
+      tenantId: runtime.tenant.id,
+      providerConfigId: provider.id,
+      credentialRef: provider.credentialRef ?? "secret://tenant/provider/openrouter",
+      secret: credential
+    });
+    await runtime.db.createModelConfig({
+      tenantId: runtime.tenant.id,
+      providerConfigId: provider.id,
+      modelKey: "openai/gpt-4o",
+      displayName: "GPT-4o",
+      contextWindow: 128000,
+      maxOutputTokens: 4096,
+      supportsTools: true,
+      supportsStreaming: true,
+      supportsJsonSchema: true,
+      inputModalitiesJson: ["text"],
+      outputModalitiesJson: ["text"],
+      enabled: true
+    });
+    await runtime.refreshAdminState();
+
+    const policy = compileEffectivePolicy(
+      {
+        deploymentMode: runtime.config.deploymentMode,
+        tenantId: runtime.tenant.id,
+        userId: runtime.devUser.id,
+        groupIds: [],
+        requestedProviderId: provider.id,
+        requestedModelId: "openai/gpt-4o"
+      },
+      runtime.policyDocuments,
+      runtime.inventory
+    );
+
+    expect(runtime.db.rawSearch(credential)).toBe(false);
+    expect(runtime.inventory.providers.some((item) => item.id === provider.id && item.modelIds.includes("openai/gpt-4o"))).toBe(true);
+    expect(policy.selectedProviderId).toBe(provider.id);
+    expect(policy.selectedModelId).toBe("openai/gpt-4o");
   });
 
   it("stores tool arguments/results only when retention allows", async () => {

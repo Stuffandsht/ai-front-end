@@ -27,6 +27,7 @@ Completed:
 - Added Playwright Chromium browser e2e coverage for login, retained chat, single-company admin hiding, and browser storage behavior.
 - Added required documentation files.
 - Audited and checked the first-pass acceptance checklist in `codex_goal_ai_agent_chat_platform.md` against implementation and validation evidence.
+- Implemented first-class OpenRouter provider support with attribution headers, retention-aware routing preferences, SSE streaming parsing, OpenAI-style tool-call compatibility, model catalog sync, encrypted tenant credential use, admin UI actions, and provider/model policy inventory registration.
 
 Validation performed:
 - command: `npm install`
@@ -34,13 +35,13 @@ Validation performed:
 - command: `npm run typecheck`
   result: pass
 - command: `npm run test`
-  result: pass, 35 tests including OIDC discovery/token/JWKS/ID-token verification, OpenAI-compatible provider calls, Vault Transit KMS, HTTP/stdio MCP adapters, API mutation authorization regression scan, and admin page permission regression scan
+  result: pass, 37 tests including OIDC discovery/token/JWKS/ID-token verification, OpenAI-compatible and OpenRouter provider calls, Vault Transit KMS, HTTP/stdio MCP adapters, API mutation authorization regression scan, and admin page permission regression scan
 - command: `npm run test:integration`
-  result: pass, including migration execution and SQL-backed retained/ephemeral chat runtime tests
+  result: pass, 11 tests including migration execution, SQL-backed retained/ephemeral chat runtime tests, and OpenRouter policy inventory registration with encrypted credentials
 - command: `npm run test:e2e`
   result: pass with Playwright Chromium browser tests when run with host-level local bind permission
 - command: `npm run test:e2e:headless`
-  result: pass for fast runtime/static e2e checks
+  result: pass for fast runtime/static e2e checks, including OpenRouter admin configuration and sync route coverage
 - command: `npm run test:all`
   result: pass when run with host-level local bind permission; includes lint, typecheck, unit/security, integration, headless e2e, and browser e2e
 - command: `npm run lint`
@@ -71,8 +72,10 @@ Validation performed:
   result: pass against the Compose-launched app, returned single-company public config
 - command: Compose-launched dev login and retained `POST /api/chat`
   result: pass through the Postgres-backed runtime, returned policy event, stream deltas, and retained message id
+- command: Compose-launched `POST /api/providers` with `providerType=openrouter`
+  result: pass, created an OpenRouter tenant provider with encrypted credential storage
 - command: raw Compose Postgres row check after retained chat
-  result: pass, found retained message/conversation/audit rows and no plaintext sentinel in raw message rows
+  result: pass, found retained message/conversation/audit rows, an OpenRouter provider row, one provider credential row, and no plaintext chat or OpenRouter API-key sentinels in raw encrypted columns
 - command: Compose-launched retention policy PATCH and provider POST with API key
   result: pass, wrote durable retention and provider rows, encrypted one provider credential, and raw Postgres search found no plaintext provider secret
 - command: `APP_DEPLOYMENT_MODE=single_company docker compose --profile single-company down`
